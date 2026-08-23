@@ -39,31 +39,31 @@
 
 ---
 
-## 3. Acceptance Test Matrix (Leak & Hardening Matrix)
+## 3. Acceptance Verification Matrix
 
-Every release of `anonbox` must pass 100% of the following verification checks:
+Every release of `anonbox` must satisfy 100% of the following verification checks:
 
-| ID | Test Name | Verification Command | Expected Result |
+| # | Verification Check | Command | Expected Result |
 | :--- | :--- | :--- | :--- |
-| **TEST-01** | TransPort TCP Routing | `curl -s https://check.torproject.org` | Returns Tor confirmation |
-| **TEST-02** | DNS Leak Prevention | `dig +short @127.0.0.1 -p 5353 whoami.akamai.net` | Resolves to Tor exit IP |
-| **TEST-03** | DNS UDP Fallback Drop | `dig @1.1.1.1 google.com` | **Timeout / Drop** (No clearnet leak) |
-| **TEST-04** | UDP Leak Prevention | `nc -u -z -w 2 8.8.8.8 53` | **Dropped by nftables** |
-| **TEST-05** | ICMP Leak Prevention | `ping -c 2 -W 2 1.1.1.1` | **100% packet loss** |
-| **TEST-06** | IPv6 Leak Prevention | `curl -6 https://icanhazip.com` | **Immediate network failure** |
-| **TEST-07** | Kill-Switch on Crash | Stop `tor` (`systemctl stop tor`) & run `curl` | **Connection refused / 0 bytes leaked** |
-| **TEST-08** | Stream Isolation | `curl` to 2 distinct endpoints simultaneously | **Different exit IPs returned** |
-| **TEST-09** | Timezone Check | `date +%Z` | Returns `UTC` |
-| **TEST-10** | LUKS Encryption Check | `lsblk -f` | Root mounted on `crypto_LUKS` |
-| **TEST-11** | Swap Security Check | `swapon --show` | Swap on LUKS, `zram`, or disabled |
-| **TEST-12** | ControlPort Auth Check | `nc -z 127.0.0.1 9053` | Requires authentication cookie |
-| **TEST-13** | User & Home Isolation | `stat -c %a /home/*` & `umask` | `700` permissions on home and umask `027` |
-| **TEST-14** | Core Dump Disabled | `sysctl fs.suid_dumpable` | Returns `0` |
-| **TEST-15** | Kernel Yama & TTY | `sysctl kernel.yama.ptrace_scope` | `ptrace_scope >= 2` |
-| **TEST-16** | Mounts Security Check | `findmnt /tmp /var/tmp /dev/shm` | Mounted with `noexec,nosuid,nodev` |
-| **TEST-17** | AppArmor Status Check | `aa-status` | Active and enforcing profiles |
-| **TEST-18** | TCP Timestamp Check | `sysctl net.ipv4.tcp_timestamps` | Returns `0` |
-| **TEST-19** | User Namespaces Check | `sysctl kernel.unprivileged_userns_clone` | Returns `0` |
-| **TEST-20** | Machine-ID Pool Check | `cat /etc/machine-id` | Standardized anonymity UUID |
-| **TEST-21** | NM Connectivity Check | `cat /etc/NetworkManager/conf.d/20-connectivity.conf` | `enabled=false` |
-| **TEST-22** | Boot Ordering Check | `systemctl show -p Before nftables` | Contains `network-pre.target` |
+| **01** | TransPort TCP Routing | `curl -s https://check.torproject.org` | Returns Tor confirmation |
+| **02** | DNS Leak Prevention | `dig +short @127.0.0.1 -p 5353 whoami.akamai.net` | Resolves to Tor exit IP |
+| **03** | DNS UDP Fallback Drop | `dig @1.1.1.1 google.com` | **Timeout / Drop** (No clearnet leak) |
+| **04** | UDP Leak Prevention | `nc -u -z -w 2 8.8.8.8 53` | **Dropped by nftables** |
+| **05** | ICMP Leak Prevention | `ping -c 2 -W 2 1.1.1.1` | **100% packet loss** |
+| **06** | IPv6 Leak Prevention | `curl -6 https://icanhazip.com` | **Immediate network failure** |
+| **07** | Kill-Switch on Crash | Stop `tor` (`systemctl stop tor`) & run `curl` | **Connection refused / 0 bytes leaked** |
+| **08** | Stream Isolation | `curl` to 2 distinct endpoints simultaneously | **Different exit IPs returned** |
+| **09** | Timezone Check | `date +%Z` | Returns `UTC` |
+| **10** | LUKS Encryption Check | `lsblk -f` | Root mounted on `crypto_LUKS` |
+| **11** | Swap Security Check | `swapon --show` | Swap on LUKS, `zram`, or disabled |
+| **12** | ControlPort Auth Check | `nc -z 127.0.0.1 9053` | Requires authentication cookie |
+| **13** | User & Home Isolation | `stat -c %a /home/*` & `umask` | `700` permissions on home and umask `027` |
+| **14** | Core Dump Disabled | `sysctl fs.suid_dumpable` | Returns `0` |
+| **15** | Kernel Yama & TTY | `sysctl kernel.yama.ptrace_scope` | `ptrace_scope >= 2` |
+| **16** | Mounts Security Check | `findmnt /tmp /var/tmp /dev/shm` | Mounted with `noexec,nosuid,nodev` |
+| **17** | AppArmor Status Check | `aa-status` | Active and enforcing profiles |
+| **18** | TCP Timestamp Check | `sysctl net.ipv4.tcp_timestamps` | Returns `0` |
+| **19** | User Namespaces Check | `sysctl kernel.unprivileged_userns_clone` | Returns `0` |
+| **20** | Machine-ID Pool Check | `cat /etc/machine-id` | Standardized anonymity UUID |
+| **21** | NM Connectivity Check | `cat /etc/NetworkManager/conf.d/20-connectivity.conf` | `enabled=false` |
+| **22** | Boot Ordering Check | `systemctl show -p Before nftables` | Contains `network-pre.target` |
