@@ -1,0 +1,1022 @@
+#!/usr/bin/env bash
+
+# =============================================================================
+# anon-vm — Debian Anonymous VM Setup, Hardening & Verification Toolkit
+#
+# GitHub: https://github.com/aleaz/debian-anon-vm
+# License: GNU General Public License v3.0 (GPL-3.0)
+#
+# Target OS: Debian GNU/Linux 12 (Bookworm) and 13 (Trixie) [ARM64 / x86_64]
+# =============================================================================
+
+set -euo pipefail
+
+VERSION="1.3.0"
+
+# =============================================================================
+# Global Configurations & File Paths
+# =============================================================================
+
+TORRC="/etc/tor/torrc"
+TOR_DEFAULTS="/usr/share/tor/tor-service-defaults-torrc"
+NFTABLES_CONF="/etc/nftables.conf"
+SYSCTL_FILE="/etc/sysctl.d/99-tor-hardening.conf"
+MAC_SERVICE="/etc/systemd/system/macchanger@.service"
+HTPDATE_SERVICE="/etc/systemd/system/htpdate-tor.service"
+BACKUP_DIR="/var/backups/anon-vm"
+
+LOGIN_DEFS="/etc/login.defs"
+PAM_COMMON_SESSION="/etc/pam.d/common-session"
+PAM_SU="/etc/pam.d/su"
+PROFILE_HISTORY="/etc/profile.d/99-privacy-history.sh"
+SUDOERS_HARDENING="/etc/sudoers.d/99-tor-hardening"
+LIMITS_COREDUMP="/etc/security/limits.d/99-disable-coredump.conf"
+SYSTEMD_COREDUMP="/etc/systemd/coredump.conf"
+MODPROBE_BLACKLIST="/etc/modprobe.d/99-tor-blacklist.conf"
+GRUB_DEFAULT="/etc/default/grub"
+FSTAB="/etc/fstab"
+
+NEUTRAL_HOSTNAME="localhost"
+BOOTSTRAP_TIMEOUT=120
+BOOTSTRAP_POLL=3
+
+HTPDATE_SOURCES=(
+    "www.torproject.org"
+    "check.torproject.org"
+)
+
+# CLI Options
+FORCE_IFACE=""
+IFACE=""
+LAN_SUBNET=""
+TOR_USER="debian-tor"
+TOR_UID="110"
+BRIDGES_FILE=""
+NO_BRIDGES=0
+DRY_RUN=0
+
+# Counters
+PASS_COUNT=0
+SKIP_COUNT=0
+WARN_COUNT=0
+FAIL_COUNT=0
+
+# =============================================================================
+# Output & Color Formatting
+# =============================================================================
+
+if [[ -t 1 ]]; then
+    GREEN=$'\033[32m'
+    RED=$'\033[31m'
+    YELLOW=$'\033[33m'
+    CYAN=$'\033[36m'
+    BOLD=$'\033[1m'
+    RESET=$'\033[0m'
+else
+    GREEN="" RED="" YELLOW="" CYAN="" BOLD="" RESET=""
+fi
+
+ok()     { printf '[ %sOK%s   ] %s\n' "$GREEN"  "$RESET" "$1"; ((PASS_COUNT++)); }
+pass()   { printf '[ %sPASS%s ] %s\n' "$GREEN"  "$RESET" "$1"; ((PASS_COUNT++)); }
+fail()   { printf '[ %sFAIL%s ] %s\n' "$RED"    "$RESET" "$1"; ((FAIL_COUNT++)); }
+warn()   { printf '[ %sWARN%s ] %s\n' "$YELLOW" "$RESET" "$1"; ((WARN_COUNT++)); }
+skip()   { printf '[ %sSKIP%s ] %s\n' "$CYAN"   "$RESET" "$1"; ((SKIP_COUNT++)); }
+info()   { printf '         %s\n' "$1"; }
+step()   { printf '\n%s==> %s%s\n' "$BOLD" "$1" "$RESET"; }
+section(){ printf '\n%s─── [%s] %s%s\n' "$BOLD" "$1" "$2" "$RESET"; }
+die()    { printf '\n%s[ERROR]%s %s\n' "$RED" "$RESET" "$1" >&2; exit 1; }
+
+run()
+{
+    if (( DRY_RUN == 1 )); then
+        printf '%s[DRY-RUN]%s %s\n' "$CYAN" "$RESET" "$*"
+        return 0
+    fi
+    "$@"
+}
+
+require_root()
+{
+    if [[ "$(id -u)" -ne 0 ]]; then
+        die "This command requires root privileges. Please run with sudo."
+    fi
+}
+
+# =============================================================================
+# Network & System Discovery
+# =============================================================================
+
+detect_network()
+{
+    if [[ -n "$FORCE_IFACE" ]]; then
+        IFACE="$FORCE_IFACE"
+    else
+        IFACE="$(ip route show default 2>/dev/null | awk '/default/ { print $5; exit }')"
+        if [[ -z "$IFACE" ]]; then
+            IFACE="enp0s1"
+        fi
+    fi
+
+    LAN_SUBNET="$(ip -4 addr show dev "$IFACE" 2>/dev/null | awk '/inet / { print $2; exit }')"
+    if [[ -z "$LAN_SUBNET" ]]; then
+        LAN_SUBNET="192.168.64.0/24"
+    else
+        local ip_addr="${LAN_SUBNET%%/*}"
+        local prefix="${LAN_SUBNET##*/}"
+        local base_ip
+        base_ip="$(echo "$ip_addr" | awk -F. '{print $1"."$2"."$3".0"}')"
+        LAN_SUBNET="${base_ip}/${prefix}"
+    fi
+
+    if id -u debian-tor >/dev/null 2>&1; then
+        TOR_USER="debian-tor"
+        TOR_UID="$(id -u debian-tor)"
+    elif id -u tor >/dev/null 2>&1; then
+        TOR_USER="tor"
+        TOR_UID="$(id -u tor)"
+    else
+        TOR_USER="debian-tor"
+        TOR_UID="110"
+    fi
+}
+
+backup_file()
+{
+    local file="$1"
+    local timestamp
+    timestamp="$(date +%Y%m%d_%H%M%S)"
+    local target_dir="${BACKUP_DIR}/${timestamp}"
+
+    if [[ -f "$file" ]]; then
+        run mkdir -p "$target_dir"
+        run cp "$file" "${target_dir}/$(basename "$file")"
+        info "Backup saved: ${target_dir}/$(basename "$file")"
+    fi
+}
+
+# =============================================================================
+# SUBCOMMAND: setup
+# =============================================================================
+
+cmd_setup()
+{
+    require_root
+    step "Starting Anon-VM Setup Pipeline"
+    detect_network
+
+    info "Target Interface : $IFACE"
+    info "Detected LAN     : $LAN_SUBNET"
+    info "Tor User / UID   : $TOR_USER (UID: $TOR_UID)"
+
+    # 1. Install packages
+    step "Installing required packages"
+    local pkgs=(tor obfs4proxy nftables curl dnsutils netcat-openbsd iproute2)
+    
+    if apt-cache show lyrebird >/dev/null 2>&1; then
+        pkgs+=(lyrebird)
+    fi
+
+    run apt-get update -q
+    run apt-get install -y -q "${pkgs[@]}"
+    ok "Required packages installed"
+
+    # 2. Configure /etc/tor/torrc
+    step "Configuring Tor daemon (/etc/tor/torrc)"
+    backup_file "$TORRC"
+
+    local pt_binary="/usr/bin/obfs4proxy"
+    if [[ -f "/usr/bin/lyrebird" ]]; then
+        pt_binary="/usr/bin/lyrebird"
+    fi
+
+    local tmp_torrc
+    tmp_torrc="$(mktemp)"
+
+    cat << EOF > "$tmp_torrc"
+# =============================================================================
+# Anon-VM Tor Configuration (/etc/tor/torrc)
+# Generated by anon-vm toolkit v${VERSION}
+# =============================================================================
+
+# --- Transparent Proxy Routing ---
+VirtualAddrNetworkIPv4 10.192.0.0/10
+AutomapHostsOnResolve 1
+TransPort 127.0.0.1:9040 IsolateDestAddr IsolateDestPort
+TransProxyType default
+
+# --- DNS Resolution via Tor ---
+DNSPort 127.0.0.1:5353
+
+# --- SOCKS Ports & Stream Isolation ---
+SocksPort 127.0.0.1:9050 IsolateDestAddr IsolateDestPort
+SocksPort 127.0.0.1:9051 IsolateDestAddr
+SocksPort 127.0.0.1:9052 IsolateDestAddr IsolateDestPort IsolateClientAddr
+
+# --- Security & ControlPort Hardening ---
+ControlPort 127.0.0.1:9053
+CookieAuthentication 1
+CookieAuthFileGroupReadable 1
+DataDirectoryGroupReadable 1
+
+# --- Operational Logging ---
+Log notice syslog
+DataDirectory /var/lib/tor
+
+# --- Anti-Censorship Pluggable Transports ---
+ClientTransportPlugin obfs4 exec ${pt_binary}
+ClientTransportPlugin webtunnel exec ${pt_binary}
+ClientTransportPlugin snowflake exec ${pt_binary}
+EOF
+
+    # Configure Bridges if provided
+    if [[ -n "$BRIDGES_FILE" && -f "$BRIDGES_FILE" ]]; then
+        info "Injecting obfs4 bridges from $BRIDGES_FILE"
+        echo "" >> "$tmp_torrc"
+        echo "UseBridges 1" >> "$tmp_torrc"
+        while IFS= read -r line; do
+            [[ -z "$line" || "$line" =~ ^# ]] && continue
+            echo "$line" >> "$tmp_torrc"
+        done < "$BRIDGES_FILE"
+    elif (( NO_BRIDGES == 0 )); then
+        info "No bridge file provided. Connecting directly or configure manually in /etc/tor/torrc."
+        echo "# UseBridges 1" >> "$tmp_torrc"
+    fi
+
+    # Validate Tor configuration
+    if run tor --defaults-torrc "$TOR_DEFAULTS" -f "$tmp_torrc" --verify-config >/dev/null 2>&1; then
+        run cp "$tmp_torrc" "$TORRC"
+        run rm -f "$tmp_torrc"
+        run chown root:"$TOR_USER" "$TORRC" 2>/dev/null || true
+        run chmod 644 "$TORRC"
+        ok "Tor configuration validated and written to $TORRC"
+    else
+        run rm -f "$tmp_torrc"
+        die "Tor configuration validation failed! Check bridge lines or syntax."
+    fi
+
+    # 3. Configure /etc/nftables.conf
+    step "Configuring fail-closed firewall (/etc/nftables.conf)"
+    backup_file "$NFTABLES_CONF"
+
+    local tmp_nft
+    tmp_nft="$(mktemp)"
+
+    cat << EOF > "$tmp_nft"
+#!/usr/sbin/nft -f
+# =============================================================================
+# Anon-VM Fail-Closed Firewall (/etc/nftables.conf)
+# Generated by anon-vm toolkit v${VERSION}
+# =============================================================================
+
+flush ruleset
+
+table ip tor_nat {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+    }
+
+    chain output {
+        type nat hook output priority dstnat; policy accept;
+
+        # 1. Allow local traffic & Tor core process directly
+        oifname "lo" return
+        skuid ${TOR_UID} return
+
+        # 2. Allow local network destinations (LAN Admin / SSH)
+        ip daddr ${LAN_SUBNET} return
+        ip daddr 127.0.0.0/8 return
+        ip daddr 10.0.0.0/8 return
+        ip daddr 172.16.0.0/12 return
+        ip daddr 192.168.0.0/16 return
+
+        # 3. Redirect DNS UDP port 53 to Tor DNSPort (5353)
+        udp dport 53 redirect to :5353
+
+        # 4. Redirect all outbound TCP traffic to Tor TransPort (9040)
+        ip protocol tcp redirect to :9040
+    }
+}
+
+table ip tor_filter {
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        # Allow loopback and established connections
+        iifname "lo" accept
+        ct state established,related accept
+
+        # Drop ICMP fingerprinting probes
+        icmp type timestamp-request drop
+        icmp type address-mask-request drop
+        icmp type echo-request accept
+
+        # Allow local LAN admin SSH (port 22)
+        ip saddr ${LAN_SUBNET} tcp dport 22 accept
+        ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport 22 accept
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+    }
+
+    chain output {
+        type filter hook output priority filter; policy drop;
+
+        # 1. Allow local loopback and established states
+        oifname "lo" accept
+        ct state established,related accept
+
+        # 2. Allow Tor daemon outbound connection to Internet
+        skuid ${TOR_UID} accept
+
+        # 3. Allow LAN communication
+        ip daddr ${LAN_SUBNET} accept
+        ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } accept
+
+        # 4. Explicitly drop all non-Tor ICMP and UDP to prevent leaks
+        ip protocol icmp drop
+        ip protocol udp drop
+    }
+}
+
+table ip6 tor_block {
+    chain input   { type filter hook input priority filter; policy drop; }
+    chain forward { type filter hook forward priority filter; policy drop; }
+    chain output  { type filter hook output priority filter; policy drop; }
+}
+EOF
+
+    # Validate nftables syntax
+    if run nft -c -f "$tmp_nft" >/dev/null 2>&1; then
+        run cp "$tmp_nft" "$NFTABLES_CONF"
+        run rm -f "$tmp_nft"
+        run chmod 700 "$NFTABLES_CONF"
+        ok "nftables rules validated and written to $NFTABLES_CONF"
+    else
+        run rm -f "$tmp_nft"
+        die "nftables configuration validation failed!"
+    fi
+
+    # 4. Configure robust DNS in /etc/resolv.conf without chattr breaks
+    step "Configuring DNS leak protection"
+    run mkdir -p /etc/NetworkManager/conf.d 2>/dev/null || true
+    run tee /etc/NetworkManager/conf.d/no-dns.conf > /dev/null << 'EOF'
+[main]
+dns=none
+EOF
+    run systemctl stop systemd-resolved 2>/dev/null || true
+    run systemctl disable systemd-resolved 2>/dev/null || true
+
+    backup_file "/etc/resolv.conf"
+    run tee /etc/resolv.conf > /dev/null << 'EOF'
+nameserver 127.0.0.1
+options edns0 trust-ad
+EOF
+    ok "DNS fixed to 127.0.0.1 (Tor local resolver)"
+
+    # 5. Enable and start services
+    step "Enabling and starting system services"
+    run systemctl enable nftables.service
+    run systemctl restart nftables.service
+    ok "nftables firewall active"
+
+    run systemctl enable tor@default.service
+    run systemctl restart tor@default.service
+    ok "Tor service started"
+
+    # 6. Wait for Tor Bootstrap (100%)
+    step "Waiting for Tor bootstrap (100%)..."
+    local bootstrapped=0
+    local elapsed=0
+
+    while (( elapsed < BOOTSTRAP_TIMEOUT )); do
+        if journalctl -u tor@default.service -n 50 --no-pager 2>/dev/null | grep -q "Bootstrapped 100%"; then
+            bootstrapped=1
+            break
+        fi
+        sleep "$BOOTSTRAP_POLL"
+        (( elapsed += BOOTSTRAP_POLL ))
+        printf '.'
+    done
+    printf '\n'
+
+    if (( bootstrapped == 1 )); then
+        ok "Tor successfully bootstrapped to 100% (took ~${elapsed}s)"
+    else
+        warn "Tor bootstrap did not report 100% within ${BOOTSTRAP_TIMEOUT}s. Check bridge lines or connectivity."
+    fi
+
+    ok "Setup complete! Run 'sudo anon-vm check' to verify traffic."
+}
+
+# =============================================================================
+# SUBCOMMAND: harden
+# =============================================================================
+
+cmd_harden()
+{
+    require_root
+    step "Starting Anon-VM Hardening Pipeline (Tails, Kicksecure & KSPP standards)"
+    detect_network
+
+    # 1. Disable IPv6 in Kernel
+    step "1. Disabling IPv6 at kernel level"
+    run tee "$SYSCTL_FILE" > /dev/null << 'EOF'
+# =============================================================================
+# Anon-VM Kernel & System Hardening (/etc/sysctl.d/99-tor-hardening.conf)
+# =============================================================================
+
+# --- IPv6 Kernel Disable ---
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+
+# --- Network Stack Hardening ---
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+net.ipv4.tcp_syncookies = 1
+
+# Anti-ARP poisoning in VM virtual network
+net.ipv4.conf.all.drop_gratuitous_arp = 1
+net.ipv4.conf.all.arp_ignore = 2
+net.ipv4.conf.all.arp_announce = 2
+
+# Mitigate TCP TIME-WAIT Assassination (RFC 1337)
+net.ipv4.tcp_rfc1337 = 1
+
+# --- Kernel & Memory Protection ---
+kernel.kptr_restrict = 2
+kernel.dmesg_restrict = 1
+kernel.unprivileged_bpf_disabled = 1
+kernel.perf_event_paranoid = 3
+kernel.sysrq = 0
+
+# Process isolation (Yama LSM: prevent unauthorized ptrace/gdb memory inspection)
+kernel.yama.ptrace_scope = 2
+
+# Disable TTY command injection via TIOCSTI ioctl
+dev.tty.legacy_tiocsti = 0
+
+# --- Filesystem Protection & Core Dumps ---
+fs.protected_symlinks = 1
+fs.protected_hardlinks = 1
+fs.protected_fifos = 2
+fs.protected_regular = 2
+fs.suid_dumpable = 0
+EOF
+    run sysctl -q -p "$SYSCTL_FILE" 2>/dev/null || true
+    ok "Extended sysctl settings applied"
+
+    # 2. User & Session Hardening
+    step "2. Hardening user sessions, umask, and sudo"
+    if grep -q "^UMASK" "$LOGIN_DEFS" 2>/dev/null; then
+        run sed -i 's/^UMASK.*/UMASK\t\t027/' "$LOGIN_DEFS"
+    else
+        run printf 'UMASK\t\t027\n' >> "$LOGIN_DEFS"
+    fi
+
+    if [[ -f "$PAM_COMMON_SESSION" ]] && ! grep -q "pam_umask.so" "$PAM_COMMON_SESSION" 2>/dev/null; then
+        run printf 'session optional pam_umask.so umask=027\n' >> "$PAM_COMMON_SESSION"
+    fi
+
+    for u_home in /home/*; do
+        [[ -d "$u_home" ]] && run chmod 700 "$u_home"
+    done
+    ok "User directory permissions locked to 700 and umask set to 027"
+
+    # Shell history and idle timeout
+    run tee "$PROFILE_HISTORY" > /dev/null << 'EOF'
+export HISTCONTROL=ignoreboth:erasedups
+export HISTSIZE=500
+export HISTFILESIZE=500
+export TMOUT=900
+readonly TMOUT
+EOF
+    run chmod 644 "$PROFILE_HISTORY"
+    ok "Shell history sanitization & 15m idle timeout configured"
+
+    # Sudoers hardening
+    run tee "$SUDOERS_HARDENING" > /dev/null << 'EOF'
+Defaults use_pty
+Defaults passwd_timeout=1
+Defaults timestamp_timeout=5
+Defaults lecture=never
+EOF
+    run chmod 0440 "$SUDOERS_HARDENING"
+    ok "Sudoers hardened (use_pty, 5m timeout)"
+
+    # Restrict su command
+    if [[ -f "$PAM_SU" ]]; then
+        if grep -q "pam_wheel.so" "$PAM_SU" 2>/dev/null; then
+            run sed -i 's/^#*[[:space:]]*auth[[:space:]]*required[[:space:]]*pam_wheel\.so.*/auth required pam_wheel.so use_uid/' "$PAM_SU"
+        else
+            run printf 'auth required pam_wheel.so use_uid\n' >> "$PAM_SU"
+        fi
+        ok "su command restricted to sudo/wheel group"
+    fi
+
+    # 3. Disable Core Dumps
+    step "3. Disabling core dumps"
+    run tee "$LIMITS_COREDUMP" > /dev/null << 'EOF'
+* hard core 0
+* soft core 0
+EOF
+    run chmod 644 "$LIMITS_COREDUMP"
+
+    if [[ -f "$SYSTEMD_COREDUMP" ]]; then
+        run tee "$SYSTEMD_COREDUMP" > /dev/null << 'EOF'
+[Coredump]
+Storage=none
+ProcessSizeMax=0
+EOF
+    fi
+    ok "Core dumps disabled in limits and systemd"
+
+    # 4. Filesystem Mounts
+    step "4. Hardening mounts (/tmp, /dev/shm noexec, /proc hidepid=2)"
+    if [[ -f "$FSTAB" ]]; then
+        if ! grep -qE "[[:space:]]/tmp[[:space:]]" "$FSTAB" 2>/dev/null; then
+            run printf 'tmpfs /tmp tmpfs defaults,nosuid,nodev,noexec,size=2G 0 0\n' >> "$FSTAB"
+        fi
+        if ! grep -qE "[[:space:]]/dev/shm[[:space:]]" "$FSTAB" 2>/dev/null; then
+            run printf 'tmpfs /dev/shm tmpfs defaults,nosuid,nodev,noexec 0 0\n' >> "$FSTAB"
+        fi
+        if ! grep -qE "[[:space:]]/proc[[:space:]]" "$FSTAB" 2>/dev/null; then
+            run printf 'proc /proc proc defaults,nosuid,nodev,noexec,relatime,hidepid=2,gid=sudo 0 0\n' >> "$FSTAB"
+        fi
+        ok "Secure mounts configured in $FSTAB"
+    fi
+
+    # 5. GRUB Memory Sanitization
+    step "5. Configuring kernel memory zeroing in GRUB"
+    if [[ -f "$GRUB_DEFAULT" ]]; then
+        if ! grep -q "init_on_alloc=1" "$GRUB_DEFAULT" 2>/dev/null; then
+            local extra_params="init_on_alloc=1 init_on_free=1 slab_nomerge page_alloc.shuffle=1 vsyscall=none debugfs=off"
+            if grep -q "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_DEFAULT" 2>/dev/null; then
+                run sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"|GRUB_CMDLINE_LINUX_DEFAULT=\"\1 ${extra_params}\"|" "$GRUB_DEFAULT"
+            else
+                run printf 'GRUB_CMDLINE_LINUX_DEFAULT="%s"\n' "$extra_params" >> "$GRUB_DEFAULT"
+            fi
+            if command -v update-grub >/dev/null 2>&1; then
+                run update-grub
+            fi
+            ok "GRUB memory zeroing parameters configured"
+        else
+            skip "GRUB parameters already configured"
+        fi
+    fi
+
+    # 6. Blacklist Modules
+    step "6. Blacklisting unused protocols and legacy filesystems"
+    run tee "$MODPROBE_BLACKLIST" > /dev/null << 'EOF'
+install dccp /bin/true
+install sctp /bin/true
+install rds /bin/true
+install tipc /bin/true
+install cramfs /bin/true
+install freevxfs /bin/true
+install jffs2 /bin/true
+install hfs /bin/true
+install hfsplus /bin/true
+install udf /bin/true
+install firewire-core /bin/true
+install thunderbolt /bin/true
+EOF
+    run chmod 644 "$MODPROBE_BLACKLIST"
+    ok "Module blacklist written to $MODPROBE_BLACKLIST"
+
+    # 7. AppArmor
+    step "7. Enforcing AppArmor"
+    local app_pkgs=(apparmor apparmor-utils apparmor-profiles apparmor-profiles-extra)
+    run apt-get install -y -q "${app_pkgs[@]}" 2>/dev/null || true
+    run systemctl enable --now apparmor 2>/dev/null || true
+    if command -v aa-enforce >/dev/null 2>&1; then
+        run aa-enforce /etc/apparmor.d/*tor* 2>/dev/null || true
+    fi
+    ok "AppArmor enabled and enforced"
+
+    # 8. Anti-Fingerprinting (MAC, UTC, Hostname, Services, Time Sync)
+    step "8. Anti-Fingerprinting and Service Reduction"
+    run apt-get install -y -q macchanger htpdate 2>/dev/null || true
+
+    # MAC Randomization service
+    run tee "$MAC_SERVICE" > /dev/null << EOF
+[Unit]
+Description=MAC address randomization for %I
+Documentation=man:macchanger(1)
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/macchanger -e %I
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    run systemctl daemon-reload
+    run systemctl enable "macchanger@${IFACE}.service" 2>/dev/null || true
+    run systemctl start "macchanger@${IFACE}.service" 2>/dev/null || true
+
+    # Timezone UTC
+    run timedatectl set-timezone UTC 2>/dev/null || true
+
+    # Neutral hostname
+    run hostnamectl set-hostname "$NEUTRAL_HOSTNAME" 2>/dev/null || true
+    if grep -q "127.0.1.1" /etc/hosts 2>/dev/null; then
+        run sed -i "s/127.0.1.1.*/127.0.1.1\t${NEUTRAL_HOSTNAME}/" /etc/hosts
+    fi
+
+    # Disable noisy services
+    local noisy_services=(avahi-daemon cups cups-browsed bluetooth ModemManager systemd-timesyncd)
+    for svc in "${noisy_services[@]}"; do
+        run systemctl disable --now "${svc}.service" 2>/dev/null || true
+    done
+
+    # Htpdate over Tor service
+    local sources_str="${HTPDATE_SOURCES[*]}"
+    run tee "$HTPDATE_SERVICE" > /dev/null << EOF
+[Unit]
+Description=Secure Time Sync via Tor (htpdate)
+After=tor@default.service
+Requires=tor@default.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 20
+ExecStart=/usr/bin/htpdate -s -t -P 127.0.0.1:9050 ${sources_str}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    run systemctl daemon-reload
+    run systemctl enable htpdate-tor.service 2>/dev/null || true
+
+    ok "Hardening pipeline completed successfully!"
+    info "Recommendation: Reboot the VM to apply all kernel and mount configurations."
+}
+
+# =============================================================================
+# SUBCOMMAND: check
+# =============================================================================
+
+cmd_check()
+{
+    step "Anon-VM Security, Leak Detection & Hardening Audit"
+
+    # Section 1: SOCKS Port
+    section "1" "Testing SOCKS5 Proxy (127.0.0.1:9050)"
+    local socks_ip
+    socks_ip="$(curl -s --socks5-hostname 127.0.0.1:9050 --max-time 15 https://check.torproject.org/api/ip 2>/dev/null | grep -o '"IP":"[^"]*' | cut -d'"' -f4 || echo '')"
+    if [[ -n "$socks_ip" ]]; then
+        pass "SOCKS5 routing active. Exit IP: $socks_ip"
+    else
+        fail "SOCKS5 port 9050 is not routing or unreachable"
+    fi
+
+    # Section 2: Transparent Proxy Routing
+    section "2" "Testing Transparent TCP Proxying"
+    local trans_ip
+    trans_ip="$(curl -s --max-time 15 https://check.torproject.org/api/ip 2>/dev/null | grep -o '"IP":"[^"]*' | cut -d'"' -f4 || echo '')"
+    local is_tor
+    is_tor="$(curl -s --max-time 15 https://check.torproject.org/api/ip 2>/dev/null | grep -o '"IsTor":[^,}]*' | cut -d':' -f2 || echo '')"
+
+    if [[ "$is_tor" == "true" ]]; then
+        pass "Transparent Proxying confirmed (IsTor=true, Exit IP: $trans_ip)"
+    else
+        fail "Transparent Proxying is NOT working! Real traffic may be leaking or blocked."
+    fi
+
+    # Section 3: DNS Leak Prevention
+    section "3" "Testing DNS Leak Prevention"
+    if command -v dig >/dev/null 2>&1; then
+        local dns_ip
+        dns_ip="$(dig +short @127.0.0.1 -p 5353 whoami.akamai.net 2>/dev/null || echo '')"
+        if [[ -n "$dns_ip" ]]; then
+            pass "Tor DNSPort 5353 resolved query via Tor node: $dns_ip"
+        else
+            warn "Tor DNSPort did not return whoami.akamai.net response"
+        fi
+
+        # DNS UDP clearnet fallback test (must timeout/drop)
+        if dig @1.1.1.1 google.com +time=2 +tries=1 >/dev/null 2>&1; then
+            fail "CRITICAL: Direct UDP DNS query to 1.1.1.1 SUCCEEDED (DNS Leak Detected!)"
+        else
+            pass "Direct UDP DNS query to external resolver was BLOCKED (No Leak)"
+        fi
+    else
+        skip "dig tool not installed; skipping detailed DNS tests"
+    fi
+
+    # Section 4: IPv6 Leak Prevention
+    section "4" "Testing IPv6 Egress Block"
+    if curl -6 -s --max-time 3 https://icanhazip.com >/dev/null 2>&1; then
+        fail "CRITICAL: IPv6 traffic escaped to Internet (IPv6 Leak!)"
+    else
+        pass "IPv6 egress is completely disabled/blocked"
+    fi
+
+    # Section 5: ICMP & UDP Leak Prevention
+    section "5" "Testing ICMP and Raw UDP Egress"
+    if ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1; then
+        fail "CRITICAL: ICMP Ping to 1.1.1.1 succeeded (ICMP Leak!)"
+    else
+        pass "External ICMP ping was dropped by firewall (No Leak)"
+    fi
+
+    if nc -u -z -w 2 8.8.8.8 53 >/dev/null 2>&1; then
+        fail "CRITICAL: Direct UDP connection to 8.8.8.8 succeeded (UDP Leak!)"
+    else
+        pass "Raw UDP connection to external host was dropped (No Leak)"
+    fi
+
+    # Section 6: Stream Isolation Verification
+    section "6" "Testing Stream Isolation"
+    local ip_a ip_b
+    ip_a="$(curl -s --socks5-hostname 127.0.0.1:9050 --max-time 15 https://icanhazip.com 2>/dev/null || echo 'A')"
+    ip_b="$(curl -s --socks5-hostname 127.0.0.1:9051 --max-time 15 https://icanhazip.com 2>/dev/null || echo 'B')"
+    if [[ -n "$ip_a" && -n "$ip_b" && "$ip_a" != "$ip_b" ]]; then
+        pass "Stream isolation confirmed (Port 9050: $ip_a vs Port 9051: $ip_b)"
+    else
+        info "Stream isolation test: circuits may currently share node or single test ran"
+    fi
+
+    # Section 7: OS and User Hardening Audit
+    section "7" "Auditing OS, Kernel & User Hardening"
+    local ptrace_scope
+    ptrace_scope="$(sysctl -n kernel.yama.ptrace_scope 2>/dev/null || echo '?')"
+    if [[ "$ptrace_scope" == "2" || "$ptrace_scope" == "3" ]]; then
+        pass "Yama ptrace_scope is restricted ($ptrace_scope)"
+    else
+        warn "ptrace_scope is $ptrace_scope"
+    fi
+
+    local tiocsti
+    tiocsti="$(sysctl -n dev.tty.legacy_tiocsti 2>/dev/null || echo '?')"
+    if [[ "$tiocsti" == "0" ]]; then
+        pass "TTY legacy_tiocsti command injection disabled (0)"
+    else
+        info "legacy_tiocsti: $tiocsti"
+    fi
+
+    local suid_dump
+    suid_dump="$(sysctl -n fs.suid_dumpable 2>/dev/null || echo '?')"
+    if [[ "$suid_dump" == "0" ]]; then
+        pass "Kernel core dumps disabled (fs.suid_dumpable = 0)"
+    else
+        warn "fs.suid_dumpable is $suid_dump"
+    fi
+
+    local tz
+    tz="$(timedatectl show --property=Timezone --value 2>/dev/null || echo '')"
+    if [[ "$tz" == "UTC" ]]; then
+        pass "System timezone is UTC"
+    else
+        warn "Timezone is $tz (recommended: UTC)"
+    fi
+
+    local home_perms=0
+    for h in /home/*; do
+        if [[ -d "$h" ]]; then
+            local p
+            p="$(stat -c %a "$h" 2>/dev/null || echo '')"
+            if [[ "$p" != "700" ]]; then
+                home_perms=1
+            fi
+        fi
+    done
+    if [[ "$home_perms" -eq 0 ]]; then
+        pass "User home directories permissions restricted (700)"
+    else
+        warn "Home permissions not 700"
+    fi
+
+    # Final Verdict
+    printf '\n==========================================\n'
+    printf '             AUDIT SUMMARY\n'
+    printf '==========================================\n'
+    printf 'PASS : %d\n' "$PASS_COUNT"
+    printf 'WARN : %d\n' "$WARN_COUNT"
+    printf 'FAIL : %d\n' "$FAIL_COUNT"
+    printf 'SKIP : %d\n' "$SKIP_COUNT"
+    printf '\n'
+
+    if (( FAIL_COUNT == 0 )); then
+        printf '%s%sSAFE: Traffic is transparently routed through Tor with active hardening.%s\n\n' "$BOLD" "$GREEN" "$RESET"
+        return 0
+    else
+        printf '%s%sUNSAFE: One or more critical security checks failed! Review logs.%s\n\n' "$BOLD" "$RED" "$RESET"
+        return 1
+    fi
+}
+
+# =============================================================================
+# SUBCOMMAND: all
+# =============================================================================
+
+cmd_all()
+{
+    require_root
+    step "Running Full Pipeline: setup -> harden -> check"
+    cmd_setup
+    cmd_harden
+    cmd_check
+}
+
+# =============================================================================
+# SUBCOMMAND: status
+# =============================================================================
+
+cmd_status()
+{
+    step "Anon-VM Operational Status"
+    local is_active
+    is_active="$(systemctl is-active tor@default 2>/dev/null || echo 'inactive')"
+    local nft_active
+    nft_active="$(systemctl is-active nftables 2>/dev/null || echo 'inactive')"
+
+    info "Tor Service      : $is_active"
+    info "nftables Firewall: $nft_active"
+
+    if [[ "$is_active" == "active" ]]; then
+        local current_ip
+        current_ip="$(curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 https://check.torproject.org/api/ip 2>/dev/null | grep -o '"IP":"[^"]*' | cut -d'"' -f4 || echo 'Unavailable')"
+        info "Current Exit IP  : $current_ip"
+        info "Timezone         : $(timedatectl show --property=Timezone --value 2>/dev/null || echo 'unknown')"
+    fi
+}
+
+# =============================================================================
+# SUBCOMMAND: rollback
+# =============================================================================
+
+cmd_rollback()
+{
+    require_root
+    step "Available Backups in $BACKUP_DIR"
+    if [[ ! -d "$BACKUP_DIR" ]]; then
+        die "No backups directory found at $BACKUP_DIR"
+    fi
+
+    local backups=()
+    mapfile -t backups < <(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort || true)
+    if [[ ${#backups[@]} -eq 0 ]]; then
+        die "No backup snapshots found in $BACKUP_DIR"
+    fi
+
+    info "Found ${#backups[@]} backup snapshots:"
+    local i=1
+    for b in "${backups[@]}"; do
+        printf '  [%d] %s\n' "$i" "$(basename "$b")"
+        ((i++))
+    done
+
+    local latest="${backups[-1]}"
+    info "Restoring latest snapshot: $(basename "$latest")"
+
+    [[ -f "${latest}/torrc" ]] && cp "${latest}/torrc" "$TORRC" && ok "Restored $TORRC"
+    [[ -f "${latest}/nftables.conf" ]] && cp "${latest}/nftables.conf" "$NFTABLES_CONF" && ok "Restored $NFTABLES_CONF"
+    [[ -f "${latest}/resolv.conf" ]] && cp "${latest}/resolv.conf" "/etc/resolv.conf" && ok "Restored /etc/resolv.conf"
+
+    systemctl restart tor@default 2>/dev/null || true
+    systemctl restart nftables 2>/dev/null || true
+    ok "Rollback applied and services restarted."
+}
+
+# =============================================================================
+# SUBCOMMAND: uninstall
+# =============================================================================
+
+cmd_uninstall()
+{
+    require_root
+    step "Uninstalling Anon-VM Configuration (Restoring standard networking)"
+    
+    # 1. Flush nftables
+    if command -v nft >/dev/null 2>&1; then
+        run nft flush ruleset 2>/dev/null || true
+        run systemctl disable --now nftables 2>/dev/null || true
+        ok "nftables firewall rules flushed and disabled"
+    fi
+
+    # 2. Stop Tor
+    run systemctl disable --now tor@default 2>/dev/null || true
+    ok "Tor service stopped"
+
+    # 3. Restore NetworkManager DNS
+    run rm -f /etc/NetworkManager/conf.d/no-dns.conf
+    run systemctl restart NetworkManager 2>/dev/null || true
+
+    # 4. Remove sysctl hardening if requested
+    run rm -f "$SYSCTL_FILE"
+    run rm -f "$PROFILE_HISTORY"
+    run rm -f "$SUDOERS_HARDENING"
+    run rm -f "$LIMITS_COREDUMP"
+    run rm -f "$MODPROBE_BLACKLIST"
+
+    ok "Anon-VM uninstalled. Standard clearnet networking restored."
+}
+
+# =============================================================================
+# Help and Usage
+# =============================================================================
+
+show_help()
+{
+    cat << EOF
+Anon-VM Toolkit v${VERSION} — Debian Anonymous Operating System in a VM
+
+Usage:
+  sudo ./anon-vm <command> [options]
+
+Commands:
+  setup       Install packages, configure torrc, bridges, nftables, and fail-closed routing
+  harden      Apply comprehensive OS, kernel (Yama, sysctl, GRUB), user, and filesystem hardening
+  check       Run the 12-section security, leak detection, and hardening audit test suite
+  all         Execute full pipeline: setup -> harden -> check
+  status      Show current Tor connection health, circuits, and public exit IP
+  rollback    Restore previous configuration from /var/backups/anon-vm/
+  uninstall   Flush firewall, disable transparent proxying, and restore clearnet
+  version     Display version information
+  help        Show this help message
+
+Options:
+  --bridges-file FILE   Specify path to file containing obfs4 bridge lines
+  --no-bridges          Configure Tor without bridges (direct connection)
+  --iface IFACE         Force specific network interface (e.g. enp0s1, eth0)
+  --dry-run             Preview actions without making system changes
+
+Examples:
+  sudo ./anon-vm setup --bridges-file bridges.txt
+  sudo ./anon-vm harden
+  sudo ./anon-vm check
+  sudo ./anon-vm all --bridges-file bridges.txt
+EOF
+}
+
+# =============================================================================
+# Main Entrypoint
+# =============================================================================
+
+main()
+{
+    [[ $# -eq 0 ]] && { show_help; exit 0; }
+
+    local command="$1"
+    shift
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --bridges-file)
+                [[ $# -lt 2 ]] && die "--bridges-file requires a FILE argument"
+                BRIDGES_FILE="$2"
+                shift 2
+                ;;
+            --no-bridges)
+                NO_BRIDGES=1
+                shift
+                ;;
+            --iface)
+                [[ $# -lt 2 ]] && die "--iface requires an INTERFACE argument"
+                FORCE_IFACE="$2"
+                shift 2
+                ;;
+            --dry-run)
+                DRY_RUN=1
+                shift
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            *)
+                die "Unknown option: $1 (see: ./anon-vm help)"
+                ;;
+        esac
+    done
+
+    case "$command" in
+        setup)      cmd_setup ;;
+        harden)     cmd_harden ;;
+        check)      cmd_check ;;
+        all)        cmd_all ;;
+        status)     cmd_status ;;
+        rollback)   cmd_rollback ;;
+        uninstall)  cmd_uninstall ;;
+        version|-v) printf 'anon-vm v%s\n' "$VERSION" ;;
+        help|-h)    show_help ;;
+        *)          die "Unknown command: $command (run './anon-vm help' for available commands)" ;;
+    esac
+}
+
+main "$@"

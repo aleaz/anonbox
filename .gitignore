@@ -1,0 +1,14 @@
+# Backups and temporary files
+*.tmp
+*.bak
+*.swp
+*~
+.DS_Store
+
+# Runtime logs
+*.log
+/var/backups/anon-vm/
+
+# Local bridge files with private keys
+*bridges*.txt
+!examples/*
