@@ -4,7 +4,7 @@
 
 ## *Self-Hosted Hardened Tor Workstation Toolkit for Debian VMs*
 
-[![Release](https://img.shields.io/github/v/release/aleaz/anonbox?color=7D4698&style=flat-square)](https://github.com/aleaz/anonbox/releases)
+[![Version](https://img.shields.io/badge/release-v1.0.0-7D4698.svg?style=flat-square&logo=github)](https://github.com/aleaz/anonbox/releases)
 [![Debian: 12 | 13](https://img.shields.io/badge/Debian-12%20(Bookworm)%20%7C%2013%20(Trixie)-D70A53.svg?style=flat-square&logo=debian&logoColor=white)](https://www.debian.org/)
 [![Tor: Transparent Proxy](https://img.shields.io/badge/Tor-Transparent%20Proxy-7D4698.svg?style=flat-square&logo=torproject&logoColor=white)](https://www.torproject.org/)
 [![Security: Hardened](https://img.shields.io/badge/Hardening-KSPP%20%7C%20Tails%20%7C%20Whonix-success.svg?style=flat-square&logo=linux&logoColor=white)](docs/ARCHITECTURE.md)
@@ -20,8 +20,6 @@
 ---
 
 Transform a clean **Debian GNU/Linux 12 (Bookworm) or 13 (Trixie)** installation into an **isolated, hardened, fail-closed anonymous operating system** running inside a virtual machine (UTM, VirtualBox, KVM).
-
----
 
 ## Key Capabilities
 
@@ -40,8 +38,6 @@ Transform a clean **Debian GNU/Linux 12 (Bookworm) or 13 (Trixie)** installation
 * **Anti-Fingerprinting:** UTC timezone enforcement, automated MAC address randomization at boot (`macchanger`), neutral hostname (`localhost`), noisy service deactivation (`avahi`, `cups`, `bluetooth`, `ModemManager`), and anonymous HTTPS time synchronization via Tor (`htpdate`).
 * **Stream Isolation:** Dedicated isolated SOCKS5 ports (9050, 9051, 9052) with `IsolateDestAddr` and `IsolateDestPort` to prevent traffic correlation across applications.
 * **Pluggable Transports:** Support for `obfs4`, `Snowflake`, and `WebTunnel` bridges for environments with DPI or ISP-level Tor blocking.
-
----
 
 ## System Architecture
 
@@ -71,15 +67,11 @@ flowchart TD
     NFT_FILTER -.->|Blocked at Kernel| DropNode["[Destroyed / No Leak]"]
 ```
 
----
-
 ## Prerequisites
 
 1. **Operating System:** Clean minimal installation of **Debian GNU/Linux 12 (Bookworm)** or **Debian 13 (Trixie)**.
 2. **Architecture:** `ARM64` (Apple Silicon UTM) or `x86_64` (VirtualBox / KVM / Proxmox).
 3. **Storage Encryption (Mandatory):** Install Debian using **Full Disk Encryption (LUKS2 / LVM)** during the guided installer partitioning step.
-
----
 
 ## Quickstart
 
@@ -97,8 +89,6 @@ sudo ./anonbox all --bridges-file /path/to/my-bridges.txt
 # 4. Reboot to apply all kernel sysctl, GRUB memory sanitization and mount options
 sudo reboot
 ```
-
----
 
 ## CLI Command Reference (`anonbox`)
 
@@ -123,8 +113,6 @@ sudo ./anonbox rollback
 # Uninstall anonbox and restore standard clearnet networking
 sudo ./anonbox uninstall
 ```
-
----
 
 ## Stream Isolation & Application Usage
 
@@ -159,8 +147,6 @@ curl --socks5-hostname 127.0.0.1:9051 https://api-a.com
 curl --socks5-hostname 127.0.0.1:9052 https://api-b.com
 ```
 
----
-
 ## Threat Boundaries & Comparison
 
 | Security Vector | Tails OS (Live USB) | Whonix (2 VMs) | anonbox (This Project) |
@@ -174,8 +160,6 @@ curl --socks5-hostname 127.0.0.1:9052 https://api-b.com
 | **Root Compromise** | Partial | **Total** (Gateway isolated) | **Limited** (Root sees interface) |
 
 For in-depth threat modeling and test cases, see [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
----
 
 ## Documentation
 
