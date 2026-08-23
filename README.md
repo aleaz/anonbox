@@ -5,6 +5,7 @@
 [![Tor: Transparent Proxy](https://img.shields.io/badge/Tor-Transparent%20Proxy-purple.svg)](https://www.torproject.org/)
 [![Security: Hardened](https://img.shields.io/badge/Hardening-KSPP%20%7C%20Tails%20%7C%20Whonix-green.svg)](docs/ARCHITECTURE.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![CI](https://github.com/aleaz/anonbox/actions/workflows/lint.yml/badge.svg)](https://github.com/aleaz/anonbox/actions/workflows/lint.yml)
 
 Self-hosted, hardened Tor workstation for Debian VMs with encrypted persistence and fail-closed leak prevention.
 
