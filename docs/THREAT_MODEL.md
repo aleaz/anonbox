@@ -8,7 +8,10 @@
 | **Tor Routing** | iptables/nftables | Hypervisor-isolated Gateway | **Local Fail-Closed nftables** | **IN-SCOPE (Mandatory)** |
 | **Kill-Switch on Crash** | Yes | Yes | **Yes (nftables drop policy)** | **IN-SCOPE (Mandatory)** |
 | **DNS / UDP Leak Drop** | Yes | Yes | **Yes (Kernel drop + local DNSPort)** | **IN-SCOPE (Mandatory)** |
-| **Network Anti-Fingerprint** | Yes (UTC, MAC, Hostname) | Yes | **Yes (macchanger, htpdate, UTC)** | **IN-SCOPE (Mandatory)** |
+| **Boot Race Mitigation** | Yes | Yes | **Yes (Before=network-pre.target)** | **IN-SCOPE (Mandatory)** |
+| **Network Anti-Fingerprint** | Yes (UTC, MAC, Hostname) | Yes | **Yes (macchanger, htpdate, UTC, NM MAC)** | **IN-SCOPE (Mandatory)** |
+| **Machine-ID Camouflage** | Randomized per boot | Standardized dummy ID | **Standardized Anonymity Pool ID** | **IN-SCOPE (Mandatory)** |
+| **Clock-Skew Mitigation** | Yes | Yes (sclockdiv) | **Disabled TCP Timestamps (tcp_timestamps=0)** | **IN-SCOPE (Mandatory)** |
 | **Stream Isolation** | Yes (Per Application) | Yes (Per SocksPort) | **Yes (Multi-Socks + IsolateDestAddr)** | **IN-SCOPE (Mandatory)** |
 | **Root Compromise Isolation** | Partial | **Total** (WS cannot see host IP) | **Limited** (Root can inspect NIC) | **KNOWN LIMITATION (1 VM)** |
 | **Native Amnesia (RAM-Only)** | **Total** (OverlayFS in RAM) | Optional (Live mode) | **Via Hypervisor Snapshots** | **KNOWN LIMITATION (LUKS)** |
@@ -25,7 +28,8 @@
 2. **Network Observer Correlation:** The local ISP or network monitor only observes encrypted traffic to a single Tor guard node or obfs4 bridge.
 3. **Local Process Snooping:** Unprivileged users cannot snoop on `/proc` PIDs (`hidepid=2`), inject memory via `ptrace` (`ptrace_scope=2`), or read other users' files (`umask 027`, `/home/` 700).
 4. **Time & Location Fingerprinting:** System clock is set to UTC and synchronized anonymously over Tor using `htpdate`, eliminating standard unencrypted NTP UDP leaks.
-5. **Disk Forensics when Powered Off:** LUKS2 AES-XTS 512-bit disk encryption ensures disk image files (`.qcow2`, `.vdi`) are unreadable without the passphrase.
+5. **Machine-ID & Telemetry Correlation:** Standardized `/etc/machine-id`, purged `popularity-contest`, and disabled NetworkManager connectivity checks eliminate OS-level tracking tokens.
+6. **Disk Forensics when Powered Off:** LUKS2 AES-XTS 512-bit disk encryption ensures disk image files (`.qcow2`, `.vdi`) are unreadable without the passphrase.
 
 ### Out-of-Scope (Known Limitations)
 
@@ -56,5 +60,10 @@ Every release of `anonbox` must pass 100% of the following verification checks:
 | **TEST-13** | User & Home Isolation | `stat -c %a /home/*` & `umask` | `700` permissions on home and umask `027` |
 | **TEST-14** | Core Dump Disabled | `sysctl fs.suid_dumpable` | Returns `0` |
 | **TEST-15** | Kernel Yama & TTY | `sysctl kernel.yama.ptrace_scope` | `ptrace_scope >= 2` |
-| **TEST-16** | Mounts Security Check | `findmnt /tmp /dev/shm` | Mounted with `noexec,nosuid,nodev` |
+| **TEST-16** | Mounts Security Check | `findmnt /tmp /var/tmp /dev/shm` | Mounted with `noexec,nosuid,nodev` |
 | **TEST-17** | AppArmor Status Check | `aa-status` | Active and enforcing profiles |
+| **TEST-18** | TCP Timestamp Check | `sysctl net.ipv4.tcp_timestamps` | Returns `0` |
+| **TEST-19** | User Namespaces Check | `sysctl kernel.unprivileged_userns_clone` | Returns `0` |
+| **TEST-20** | Machine-ID Pool Check | `cat /etc/machine-id` | Standardized anonymity UUID |
+| **TEST-21** | NM Connectivity Check | `cat /etc/NetworkManager/conf.d/20-connectivity.conf` | `enabled=false` |
+| **TEST-22** | Boot Ordering Check | `systemctl show -p Before nftables` | Contains `network-pre.target` |
