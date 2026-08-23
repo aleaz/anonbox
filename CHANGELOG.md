@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Fixed DNS loopback capture precedence in `nftables` NAT output chain so `127.0.0.1:53` queries are redirected to Tor `DNSPort 5353` before loopback return.
+- Fixed DNS loopback capture precedence in `nftables` NAT output chain so `127.0.1.1` and `127.0.0.1:53` queries are redirected to Tor `DNSPort 5353` before loopback return.
 - Replaced static `sleep 20` in `htpdate-tor.service` with deterministic SOCKS port 9050 readiness polling.
 - Fixed audit counter isolation in `cmd_check()` to prevent cumulative counter pollution when running `anonbox all`.
 - Fixed `/etc/resolv.conf` replacement to ensure `systemd-resolved` symlinks are removed before writing static nameserver configuration.
@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Identity Camouflage:** Standardized `/etc/machine-id` and `/var/lib/dbus/machine-id` to a uniform anonymity pool UUID, preventing cross-session tracking by local applications.
+- **Telemetry Suppression:** Purged Debian `popularity-contest` package and disabled NetworkManager periodic connectivity check (`[connectivity] enabled=false`).
+- **DHCP Privacy:** Suppressed DHCP Option 12 hostname broadcast (`dhcp-send-hostname=false`) in NetworkManager configuration.
+- **Service Masking:** Disabled and masked location daemon `geoclue` and crash telemetry daemons (`kerneloops`, `whoopsie`).
 - **Anti-Fingerprint:** Added native NetworkManager MAC address randomization (`cloned-mac-address=random`) to prevent initial DHCP timing leaks.
 - **Firewall:** Eliminated blanket RFC 1918 LAN egress bypass, restricting LAN interactions strictly to established inbound SSH replies.
 - **Network Stack:** Disabled TCP timestamps (`net.ipv4.tcp_timestamps = 0`) to eliminate microsecond clock-skew de-anonymization.

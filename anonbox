@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="1.5.0"
+VERSION="1.6.0"
 
 # =============================================================================
 # Global Configurations & File Paths
@@ -24,6 +24,7 @@ NFTABLES_OVERRIDE="/etc/systemd/system/nftables.service.d/override.conf"
 SYSCTL_FILE="/etc/sysctl.d/99-tor-hardening.conf"
 MAC_SERVICE="/etc/systemd/system/macchanger@.service"
 NM_MAC_CONF="/etc/NetworkManager/conf.d/00-mac-randomize.conf"
+NM_CONN_CONF="/etc/NetworkManager/conf.d/20-connectivity.conf"
 NM_DNS_CONF="/etc/NetworkManager/conf.d/no-dns.conf"
 HTPDATE_SERVICE="/etc/systemd/system/htpdate-tor.service"
 BACKUP_DIR="/var/backups/anonbox"
@@ -40,6 +41,7 @@ GRUB_DEFAULT="/etc/default/grub"
 FSTAB="/etc/fstab"
 
 NEUTRAL_HOSTNAME="localhost"
+STANDARDIZED_MACHINE_ID="b080b36e271609e5dd34d2b90ef76453"
 BOOTSTRAP_TIMEOUT=120
 BOOTSTRAP_POLL=3
 
@@ -182,8 +184,8 @@ cmd_setup()
     info "Detected LAN     : $LAN_SUBNET"
     info "Tor User / UID   : $TOR_USER (UID: $TOR_UID)"
 
-    # 1. Install packages
-    step "Installing required packages"
+    # 1. Install packages and purge telemetry
+    step "Installing required packages and purging Debian telemetry"
     local pkgs=(tor obfs4proxy nftables curl dnsutils netcat-openbsd iproute2)
     
     if apt-cache show lyrebird >/dev/null 2>&1; then
@@ -192,7 +194,8 @@ cmd_setup()
 
     run apt-get update -q
     run apt-get install -y -q "${pkgs[@]}"
-    ok "Required packages installed"
+    run apt-get purge -y -q popularity-contest 2>/dev/null || true
+    ok "Required packages installed and popularity-contest purged"
 
     # 2. Configure /etc/tor/torrc
     step "Configuring Tor daemon (/etc/tor/torrc)"
@@ -644,11 +647,11 @@ EOF
     fi
     ok "AppArmor enabled and enforced"
 
-    # 8. Anti-Fingerprinting (Native NetworkManager MAC, UTC, Hostname, Services, Time Sync)
-    step "8. Anti-Fingerprinting and Service Reduction"
+    # 8. Anti-Fingerprinting & Telemetry Suppression
+    step "8. Anti-Fingerprinting, Machine-ID Standardizing & Telemetry Suppression"
     run apt-get install -y -q macchanger htpdate 2>/dev/null || true
 
-    # Native NetworkManager MAC Randomization (Prevents initial DHCP timing leaks)
+    # Native NetworkManager MAC Randomization & DHCP Privacy
     run mkdir -p /etc/NetworkManager/conf.d 2>/dev/null || true
     run tee "$NM_MAC_CONF" > /dev/null << 'EOF'
 [device]
@@ -657,7 +660,24 @@ wifi.scan-rand-mac-address=yes
 [connection]
 ethernet.cloned-mac-address=random
 wifi.cloned-mac-address=random
+ethernet.dhcp-send-hostname=false
+wifi.dhcp-send-hostname=false
 EOF
+
+    # Disable NetworkManager Periodic Connectivity Check (Telemetric GET /nm)
+    run tee "$NM_CONN_CONF" > /dev/null << 'EOF'
+[connectivity]
+enabled=false
+EOF
+
+    # Standardize system machine-id to blend with uniform anonymity set (Whonix pattern)
+    run tee /etc/machine-id > /dev/null << EOF
+${STANDARDIZED_MACHINE_ID}
+EOF
+    if [[ -d "/var/lib/dbus" ]]; then
+        run ln -sf /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
+    fi
+    ok "System machine-id standardized to uniform anonymity pool"
 
     # MAC Randomization service for standalone interfaces
     run tee "$MAC_SERVICE" > /dev/null << EOF
@@ -688,11 +708,13 @@ EOF
         run sed -i "s/127.0.1.1.*/127.0.1.1\t${NEUTRAL_HOSTNAME}/" /etc/hosts
     fi
 
-    # Disable noisy services
-    local noisy_services=(avahi-daemon cups cups-browsed bluetooth ModemManager systemd-timesyncd)
+    # Disable & mask noisy, telemetric and location services
+    local noisy_services=(avahi-daemon cups cups-browsed bluetooth ModemManager systemd-timesyncd geoclue kerneloops whoopsie)
     for svc in "${noisy_services[@]}"; do
         run systemctl disable --now "${svc}.service" 2>/dev/null || true
+        run systemctl mask "${svc}.service" 2>/dev/null || true
     done
+    ok "Noisy, telemetric and geolocation daemons disabled and masked"
 
     # Deterministic Htpdate over Tor service
     local sources_str="${HTPDATE_SOURCES[*]}"
@@ -843,6 +865,14 @@ cmd_check()
         warn "Timezone is $tz (recommended: UTC)"
     fi
 
+    local mid
+    mid="$(cat /etc/machine-id 2>/dev/null || echo '')"
+    if [[ "$mid" == "$STANDARDIZED_MACHINE_ID" ]]; then
+        pass "System machine-id is standardized to anonymity set"
+    else
+        info "machine-id: $mid"
+    fi
+
     local home_perms=0
     for h in /home/*; do
         if [[ -d "$h" ]]; then
@@ -984,9 +1014,10 @@ cmd_uninstall()
     run systemctl disable --now tor@default 2>/dev/null || true
     ok "Tor service stopped"
 
-    # 3. Restore NetworkManager DNS and MAC
+    # 3. Restore NetworkManager DNS, MAC and Connectivity
     run rm -f "$NM_DNS_CONF"
     run rm -f "$NM_MAC_CONF"
+    run rm -f "$NM_CONN_CONF"
     run rm -f "$NFTABLES_OVERRIDE"
     run systemctl daemon-reload
     run systemctl restart NetworkManager 2>/dev/null || true
