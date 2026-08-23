@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pluggable Transports support (`obfs4`, `Snowflake`, `WebTunnel`).
 - Automated signal trapping (`trap cleanup EXIT INT TERM HUP`) for safe temporary file removal on terminal drops.
 - Pre-flight operating system detection and validation (`validate_os`) for Debian 12 and 13.
+- Storage encryption verification for `eCryptfs` and `LUKS`/dm-crypt partitions in `check`, `status`, `setup`, and `harden`.
 - Native vector Mermaid architecture, DNS flow, and stream isolation diagrams.
 - GitHub Actions CI workflow (`.github/workflows/lint.yml`) for ShellCheck and Markdownlint validation.
 - Issue and Pull Request templates for community contribution.

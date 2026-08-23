@@ -198,6 +198,19 @@ cmd_setup()
     info "Detected LAN     : $LAN_SUBNET"
     info "Tor User / UID   : $TOR_USER (UID: $TOR_UID)"
 
+    # Storage encryption advisory check
+    local enc_found=0
+    if [[ -f "/proc/mounts" ]] && grep -qE "[[:space:]]ecryptfs[[:space:]]" /proc/mounts 2>/dev/null; then
+        enc_found=1
+        info "Storage Encryption: Active (eCryptfs mounted)"
+    elif command -v lsblk >/dev/null 2>&1 && lsblk -f 2>/dev/null | grep -qE "crypto_LUKS|crypt"; then
+        enc_found=1
+        info "Storage Encryption: Active (LUKS / dm-crypt)"
+    fi
+    if (( enc_found == 0 )); then
+        warn "Storage Encryption: No eCryptfs or LUKS partition detected (at-rest disk unencrypted)"
+    fi
+
     # 1. Install packages and purge telemetry
     step "Installing required packages and purging Debian telemetry"
     local pkgs=(tor obfs4proxy nftables curl dnsutils netcat-openbsd iproute2)
@@ -457,6 +470,19 @@ cmd_harden()
     validate_os
     step "Starting anonbox Hardening Pipeline (Tails, Kicksecure & KSPP standards)"
     detect_network
+
+    # Storage encryption advisory check
+    local enc_found=0
+    if [[ -f "/proc/mounts" ]] && grep -qE "[[:space:]]ecryptfs[[:space:]]" /proc/mounts 2>/dev/null; then
+        enc_found=1
+        info "Storage Encryption: Active (eCryptfs mounted)"
+    elif command -v lsblk >/dev/null 2>&1 && lsblk -f 2>/dev/null | grep -qE "crypto_LUKS|crypt"; then
+        enc_found=1
+        info "Storage Encryption: Active (LUKS / dm-crypt)"
+    fi
+    if (( enc_found == 0 )); then
+        warn "Storage Encryption: No eCryptfs or LUKS partition detected (at-rest disk unencrypted)"
+    fi
 
     # 1. Disable IPv6 in Kernel & Network Stack Hardening
     step "1. Applying extended kernel and network stack hardening"
@@ -907,6 +933,56 @@ cmd_check()
         warn "Home permissions not 700"
     fi
 
+    # Section 8: Storage & Filesystem Encryption Audit
+    section "8" "Auditing Storage & Filesystem Encryption (eCryptfs / LUKS)"
+    local ecryptfs_mounts=""
+    if [[ -f "/proc/mounts" ]]; then
+        ecryptfs_mounts="$(awk '$3 == "ecryptfs" { print $2 }' /proc/mounts 2>/dev/null | tr '\n' ' ' || echo '')"
+    fi
+    if [[ -z "$ecryptfs_mounts" ]] && command -v findmnt >/dev/null 2>&1; then
+        ecryptfs_mounts="$(findmnt -n -t ecryptfs -o TARGET 2>/dev/null | tr '\n' ' ' || echo '')"
+    fi
+
+    local has_ecryptfs_config=0
+    for home_dir in /home/*; do
+        if [[ -d "${home_dir}/.ecryptfs" || -d "${home_dir}/.Private" ]]; then
+            has_ecryptfs_config=1
+            break
+        fi
+    done
+    if [[ -d "/root/.ecryptfs" || -d "/root/.Private" ]]; then
+        has_ecryptfs_config=1
+    fi
+
+    local luks_active=0
+    local luks_devs=""
+    if command -v lsblk >/dev/null 2>&1; then
+        luks_devs="$(lsblk -f -n -o NAME,FSTYPE 2>/dev/null | awk '/crypto_LUKS|crypt/ { print $1 }' | tr '\n' ' ' || echo '')"
+        [[ -n "$luks_devs" ]] && luks_active=1
+    fi
+    if (( luks_active == 0 )) && command -v dmsetup >/dev/null 2>&1; then
+        if dmsetup status --target crypt 2>/dev/null | grep -q ":"; then
+            luks_active=1
+        fi
+    fi
+
+    if [[ -n "$ecryptfs_mounts" ]]; then
+        pass "eCryptfs encrypted filesystem is mounted (${ecryptfs_mounts% })"
+    elif (( has_ecryptfs_config == 1 )); then
+        warn "eCryptfs configuration found in user directory, but volume is NOT mounted!"
+        info "Run 'ecryptfs-mount-private' or unlock the encrypted folder."
+    fi
+
+    if (( luks_active == 1 )); then
+        pass "LUKS/dm-crypt encrypted storage volume is active (${luks_devs% })"
+    fi
+
+    if [[ -z "$ecryptfs_mounts" && $luks_active -eq 0 && $has_ecryptfs_config -eq 0 ]]; then
+        warn "No encrypted filesystem (eCryptfs / LUKS) detected! System storage is unencrypted at rest."
+        info "Risk: Hypervisor disk images (.qcow2, .vdi) will contain plaintext browsing & session data."
+        info "Remediation: Mount an eCryptfs private partition or deploy Debian with LUKS2 Full Disk Encryption."
+    fi
+
     # Final Verdict
     printf '\n==========================================\n'
     printf '             AUDIT SUMMARY\n'
@@ -973,6 +1049,21 @@ cmd_status()
             info "Bootstrap State       : Active (Review journalctl for progress)"
         fi
     fi
+
+    # Storage Encryption Status
+    local enc_status="Unencrypted (No eCryptfs or LUKS detected)"
+    local ecryptfs_mounts=""
+    if [[ -f "/proc/mounts" ]]; then
+        ecryptfs_mounts="$(awk '$3 == "ecryptfs" { print $2 }' /proc/mounts 2>/dev/null | tr '\n' ' ' || echo '')"
+    fi
+    if [[ -n "$ecryptfs_mounts" ]]; then
+        enc_status="Active (eCryptfs on ${ecryptfs_mounts% })"
+    elif command -v lsblk >/dev/null 2>&1 && lsblk -f 2>/dev/null | grep -qE "crypto_LUKS|crypt"; then
+        enc_status="Active (LUKS / dm-crypt block encryption)"
+    elif command -v dmsetup >/dev/null 2>&1 && dmsetup status --target crypt 2>/dev/null | grep -q ":"; then
+        enc_status="Active (dm-crypt)"
+    fi
+    info "Storage Encryption    : $enc_status"
 }
 
 # =============================================================================

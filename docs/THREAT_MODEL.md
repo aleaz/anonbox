@@ -54,7 +54,7 @@ Every release of `anonbox` must satisfy 100% of the following verification check
 | **07** | Kill-Switch on Crash | Stop `tor` (`systemctl stop tor`) & run `curl` | **Connection refused / 0 bytes leaked** |
 | **08** | Stream Isolation | `curl` to 2 distinct endpoints simultaneously | **Different exit IPs returned** |
 | **09** | Timezone Check | `date +%Z` | Returns `UTC` |
-| **10** | LUKS Encryption Check | `lsblk -f` | Root mounted on `crypto_LUKS` |
+| **10** | Storage Encryption Check | `findmnt -t ecryptfs` / `lsblk -f` | Active `ecryptfs` mount or `crypto_LUKS` |
 | **11** | Swap Security Check | `swapon --show` | Swap on LUKS, `zram`, or disabled |
 | **12** | ControlPort Auth Check | `nc -z 127.0.0.1 9053` | Requires authentication cookie |
 | **13** | User & Home Isolation | `stat -c %a /home/*` & `umask` | `700` permissions on home and umask `027` |
