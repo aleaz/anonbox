@@ -1,13 +1,23 @@
-# anonbox
+<div align="center">
 
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
-[![Debian: 12 | 13](https://img.shields.io/badge/Debian-12%20(Bookworm)%20%7C%2013%20(Trixie)-red.svg)](https://www.debian.org/)
-[![Tor: Transparent Proxy](https://img.shields.io/badge/Tor-Transparent%20Proxy-purple.svg)](https://www.torproject.org/)
-[![Security: Hardened](https://img.shields.io/badge/Hardening-KSPP%20%7C%20Tails%20%7C%20Whonix-green.svg)](docs/ARCHITECTURE.md)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
-[![CI](https://github.com/aleaz/anonbox/actions/workflows/lint.yml/badge.svg)](https://github.com/aleaz/anonbox/actions/workflows/lint.yml)
+# 🧅 Anonbox
 
-Self-hosted, hardened Tor workstation for Debian VMs with encrypted persistence and fail-closed leak prevention.
+## *Self-Hosted Hardened Tor Workstation Toolkit for Debian VMs*
+
+[![Release](https://img.shields.io/github/v/release/aleaz/anonbox?color=7D4698&style=flat-square)](https://github.com/aleaz/anonbox/releases)
+[![Debian: 12 | 13](https://img.shields.io/badge/Debian-12%20(Bookworm)%20%7C%2013%20(Trixie)-D70A53.svg?style=flat-square&logo=debian&logoColor=white)](https://www.debian.org/)
+[![Tor: Transparent Proxy](https://img.shields.io/badge/Tor-Transparent%20Proxy-7D4698.svg?style=flat-square&logo=torproject&logoColor=white)](https://www.torproject.org/)
+[![Security: Hardened](https://img.shields.io/badge/Hardening-KSPP%20%7C%20Tails%20%7C%20Whonix-success.svg?style=flat-square&logo=linux&logoColor=white)](docs/ARCHITECTURE.md)
+[![CI](https://github.com/aleaz/anonbox/actions/workflows/lint.yml/badge.svg?style=flat-square)](https://github.com/aleaz/anonbox/actions/workflows/lint.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg?style=flat-square)](LICENSE)
+
+<p align="center">
+  <b>Fail-closed Tor routing</b> • <b>Kernel memory zeroing</b> • <b>Anti-fingerprinting</b> • <b>Zero leak policy</b>
+</p>
+
+</div>
+
+---
 
 Transform a clean **Debian GNU/Linux 12 (Bookworm) or 13 (Trixie)** installation into an **isolated, hardened, fail-closed anonymous operating system** running inside a virtual machine (UTM, VirtualBox, KVM).
 
