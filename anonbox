@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="1.4.0"
+VERSION="1.4.1"
 
 # =============================================================================
 # Global Configurations & File Paths
@@ -291,21 +291,15 @@ table ip tor_nat {
     chain output {
         type nat hook output priority dstnat; policy accept;
 
-        # 1. Allow local traffic & Tor core process directly
+        # 1. Intercept and redirect ALL DNS port 53 traffic FIRST (including loopback 127.0.0.1:53)
+        udp dport 53 redirect to :5353
+        tcp dport 53 redirect to :5353
+
+        # 2. Allow local loopback and Tor daemon core process directly
         oifname "lo" return
         skuid ${TOR_UID} return
 
-        # 2. Allow local network destinations (LAN Admin / SSH)
-        ip daddr ${LAN_SUBNET} return
-        ip daddr 127.0.0.0/8 return
-        ip daddr 10.0.0.0/8 return
-        ip daddr 172.16.0.0/12 return
-        ip daddr 192.168.0.0/16 return
-
-        # 3. Redirect DNS UDP port 53 to Tor DNSPort (5353)
-        udp dport 53 redirect to :5353
-
-        # 4. Redirect all outbound TCP traffic to Tor TransPort (9040)
+        # 3. Redirect all remaining outbound TCP traffic to Tor TransPort (9040)
         ip protocol tcp redirect to :9040
     }
 }
@@ -325,7 +319,6 @@ table ip tor_filter {
 
         # Allow local LAN admin SSH (port 22)
         ip saddr ${LAN_SUBNET} tcp dport 22 accept
-        ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport 22 accept
     }
 
     chain forward {
@@ -335,21 +328,17 @@ table ip tor_filter {
     chain output {
         type filter hook output priority filter; policy drop;
 
-        # 1. Allow local loopback and established states
+        # 1. Allow local loopback and established states (including replies to inbound SSH)
         oifname "lo" accept
         ct state established,related accept
 
         # 2. Allow Tor daemon outbound connection to Internet
         skuid ${TOR_UID} accept
 
-        # 3. Allow LAN communication
-        ip daddr ${LAN_SUBNET} accept
-        ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } accept
-
-        # 4. Allow DHCP lease renewal queries on local interface
+        # 3. Allow DHCP lease renewal queries on local interface
         udp sport 68 udp dport 67 accept
 
-        # 5. Explicitly drop all non-Tor ICMP and UDP to prevent leaks
+        # 4. Explicitly drop all non-Tor ICMP and UDP to prevent leaks
         ip protocol icmp drop
         ip protocol udp drop
     }
@@ -384,6 +373,7 @@ EOF
     run systemctl disable systemd-resolved 2>/dev/null || true
 
     backup_file "/etc/resolv.conf"
+    run rm -f /etc/resolv.conf
     run tee /etc/resolv.conf > /dev/null << 'EOF'
 nameserver 127.0.0.1
 options edns0 trust-ad
@@ -435,8 +425,8 @@ cmd_harden()
     step "Starting anonbox Hardening Pipeline (Tails, Kicksecure & KSPP standards)"
     detect_network
 
-    # 1. Disable IPv6 in Kernel
-    step "1. Disabling IPv6 at kernel level"
+    # 1. Disable IPv6 in Kernel & Network Stack Hardening
+    step "1. Applying extended kernel and network stack hardening"
     run tee "$SYSCTL_FILE" > /dev/null << 'EOF'
 # =============================================================================
 # anonbox Kernel & System Hardening (/etc/sysctl.d/99-tor-hardening.conf)
@@ -446,6 +436,9 @@ cmd_harden()
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
+
+# --- Anti Clock-Skew Fingerprinting ---
+net.ipv4.tcp_timestamps = 0
 
 # --- Network Stack Hardening ---
 net.ipv4.conf.all.rp_filter = 1
@@ -469,6 +462,8 @@ net.ipv4.conf.all.arp_announce = 2
 net.ipv4.tcp_rfc1337 = 1
 
 # --- Kernel & Memory Protection ---
+kernel.randomize_va_space = 2
+kernel.kexec_load_disabled = 1
 kernel.kptr_restrict = 2
 kernel.dmesg_restrict = 1
 kernel.unprivileged_bpf_disabled = 1
@@ -591,7 +586,7 @@ EOF
     fi
 
     # 6. Blacklist Modules
-    step "6. Blacklisting unused protocols and legacy filesystems"
+    step "6. Blacklisting unused protocols, legacy filesystems, and attack vectors"
     run tee "$MODPROBE_BLACKLIST" > /dev/null << 'EOF'
 install dccp /bin/true
 install sctp /bin/true
@@ -605,6 +600,15 @@ install hfsplus /bin/true
 install udf /bin/true
 install firewire-core /bin/true
 install thunderbolt /bin/true
+install bluetooth /bin/true
+install btusb /bin/true
+install vivid /bin/true
+install n-hdlc /bin/true
+install ax25 /bin/true
+install netrom /bin/true
+install x25 /bin/true
+install rose /bin/true
+install decnet /bin/true
 EOF
     run chmod 644 "$MODPROBE_BLACKLIST"
     ok "Module blacklist written to $MODPROBE_BLACKLIST"
@@ -658,7 +662,7 @@ EOF
         run systemctl disable --now "${svc}.service" 2>/dev/null || true
     done
 
-    # Htpdate over Tor service
+    # Deterministic Htpdate over Tor service
     local sources_str="${HTPDATE_SOURCES[*]}"
     run tee "$HTPDATE_SERVICE" > /dev/null << EOF
 [Unit]
@@ -668,7 +672,7 @@ Requires=tor@default.service
 
 [Service]
 Type=oneshot
-ExecStartPre=/bin/sleep 20
+ExecStartPre=/bin/sh -c 'until nc -z 127.0.0.1 9050; do sleep 2; done'
 ExecStart=/usr/bin/htpdate -s -t -P 127.0.0.1:9050 ${sources_str}
 RemainAfterExit=yes
 
