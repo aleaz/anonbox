@@ -10,11 +10,11 @@ Transform a clean **Debian GNU/Linux 12 (Bookworm) or 13 (Trixie)** installation
 
 ---
 
-## Key Features
+## Key Capabilities
 
-* 🛡️ **Universal Transparent Proxy (Fail-Closed):** All outbound IPv4 TCP and DNS traffic is strictly captured and routed through the Tor network. If the Tor daemon crashes or stops, the firewall acts as a kill-switch, blocking 100% of clearnet traffic.
-* 🚫 **Zero-Leak Policy:** Non-Tor protocols (UDP, ICMP) and IPv6 are dropped at the kernel level (`policy drop` in `nftables` + `sysctl disable_ipv6`).
-* 🔒 **Tails & Whonix-Inspired OS Hardening:**
+* **Universal Transparent Proxy (Fail-Closed):** All outbound IPv4 TCP and DNS traffic is strictly captured and routed through the Tor network. If the Tor daemon crashes or stops, the firewall acts as a kill-switch, blocking 100% of clearnet traffic.
+* **Zero-Leak Policy:** Non-Tor protocols (UDP, ICMP) and IPv6 are dropped at the kernel level (`policy drop` in `nftables` and `sysctl disable_ipv6`).
+* **Kernel & Memory Hardening:**
   * Process isolation via Yama LSM (`kernel.yama.ptrace_scope = 2`).
   * TTY command injection mitigation (`dev.tty.legacy_tiocsti = 0`).
   * Kernel memory zeroing on allocation/free (`init_on_alloc=1`, `init_on_free=1` in GRUB).
@@ -22,43 +22,40 @@ Transform a clean **Debian GNU/Linux 12 (Bookworm) or 13 (Trixie)** installation
   * Restrictive user permissions (`umask 027`, `/home/*` locked to `700`, `TMOUT=900` auto-logout).
   * Secure temporary mounts (`noexec,nosuid,nodev` on `/tmp` and `/dev/shm`).
   * Process table hiding (`hidepid=2,gid=sudo` on `/proc`).
-  * Mandatory Access Control with **AppArmor** in enforce mode.
+  * Mandatory Access Control with AppArmor in enforce mode.
   * Attack surface reduction: Blacklist of unused protocols (`dccp`, `sctp`, `rds`, `tipc`) and legacy filesystems (`cramfs`, `jffs2`, `hfs`, `udf`).
-* 🌐 **Anti-Fingerprinting:** UTC timezone enforcement, automated MAC address randomization at boot (`macchanger`), neutral hostname (`localhost`), noisy service deactivation (`avahi`, `cups`, `bluetooth`, `ModemManager`), and anonymous HTTPS time synchronization via Tor (`htpdate`).
-* 🔀 **Stream Isolation:** Dedicated isolated SOCKS5 ports (9050, 9051, 9052) with `IsolateDestAddr` and `IsolateDestPort` to prevent traffic correlation across applications.
-* 🌉 **Pluggable Transports:** Built-in support for `obfs4`, `Snowflake`, and `WebTunnel` bridges for environments with aggressive DPI or ISP-level Tor blocking.
+* **Anti-Fingerprinting:** UTC timezone enforcement, automated MAC address randomization at boot (`macchanger`), neutral hostname (`localhost`), noisy service deactivation (`avahi`, `cups`, `bluetooth`, `ModemManager`), and anonymous HTTPS time synchronization via Tor (`htpdate`).
+* **Stream Isolation:** Dedicated isolated SOCKS5 ports (9050, 9051, 9052) with `IsolateDestAddr` and `IsolateDestPort` to prevent traffic correlation across applications.
+* **Pluggable Transports:** Support for `obfs4`, `Snowflake`, and `WebTunnel` bridges for environments with DPI or ISP-level Tor blocking.
 
 ---
 
-## Architecture Overview
+## System Architecture
 
-```text
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│                             HOST MACHINE (macOS / Linux / Windows)               │
-│                                                                                  │
-│   ┌──────────────────────────────────────────────────────────────────────────┐   │
-│   │               ANON-VM GUEST (Debian GNU/Linux ARM64/x86_64)              │   │
-│   │           [ Encrypted Full-Disk Storage via LUKS / dm-crypt ]            │   │
-│   │                                                                          │   │
-│   │   [ Applications / CLI / Tor Browser ]                                   │   │
-│   │         │               │                                                │   │
-│   │      (TCP)            (DNS)         (UDP / ICMP / IPv6)                  │   │
-│   │         ▼               ▼                   ▼                            │   │
-│   │   [ nftables: Redirection ]          [ nftables: DROP Immediately ]      │   │
-│   │         │               │                                                │   │
-│   │         ▼               ▼                                                │   │
-│   │     TransPort        DNSPort                                             │   │
-│   │     127.0.0.1:9040  127.0.0.1:5353                                       │   │
-│   │         │               │                                                │   │
-│   │         └───────┬───────┘                                                │   │
-│   │                 ▼                                                        │   │
-│   │        [ Core Tor Process ] (uid: debian-tor)                            │   │
-│   │                 │ (obfs4 / Snowflake / WebTunnel / Direct Connection)    │   │
-│   └─────────────────┼────────────────────────────────────────────────────────┘   │
-│                     │ (Single encrypted Tor egress connection)                   │
-│                     ▼                                                            │
-│   [ Virtual NAT Adapter / Host Network ] ──────────────────► Internet            │
-└──────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Host["Host Machine (macOS / Linux / Windows)"]
+        subgraph Guest["Anon-VM Guest (Debian 12/13 — LUKS2 Encrypted)"]
+            Apps["Applications / CLI / Tor Browser"]
+            
+            Apps -->|TCP Egress| NFT_NAT["nftables NAT: Redirection"]
+            Apps -->|UDP Port 53| NFT_NAT
+            Apps -->|Non-Tor UDP / ICMP / IPv6| NFT_FILTER["nftables Filter: Drop"]
+            
+            NFT_NAT -->|TCP to 127.0.0.1:9040| Tor_TransPort["Tor TransPort (:9040)"]
+            NFT_NAT -->|DNS to 127.0.0.1:5353| Tor_DNSPort["Tor DNSPort (:5353)"]
+            
+            Tor_TransPort --> Tor_Core["Tor Core Daemon (uid: debian-tor)"]
+            Tor_DNSPort --> Tor_Core
+            
+            Tor_Core -->|obfs4 / Snowflake / WebTunnel / Direct| Tor_Outbound["Encrypted Tor Traffic"]
+        end
+        
+        Tor_Outbound --> NAT_Adapter["Virtual NAT Adapter"]
+    end
+    
+    NAT_Adapter --> Internet["Internet (Tor Guard Node)"]
+    NFT_FILTER -.->|Blocked at Kernel| DropNode["[Destroyed / No Leak]"]
 ```
 
 ---
@@ -73,8 +70,6 @@ Transform a clean **Debian GNU/Linux 12 (Bookworm) or 13 (Trixie)** installation
 
 ## Quickstart
 
-Clone the repository and run the unified toolkit:
-
 ```bash
 # 1. Clone the repository
 git clone https://github.com/aleaz/debian-anon-vm.git
@@ -83,7 +78,7 @@ cd debian-anon-vm
 # 2. Run full automated pipeline (Setup + Hardening + Security Audit)
 sudo ./anon-vm all
 
-# 3. (Optional with obfs4 bridges)
+# 3. (Optional: Use obfs4 bridges file)
 sudo ./anon-vm all --bridges-file /path/to/my-bridges.txt
 
 # 4. Reboot to apply all kernel sysctl, GRUB memory sanitization and mount options
@@ -120,7 +115,20 @@ sudo ./anon-vm uninstall
 
 ## Stream Isolation & Application Usage
 
-Tor's stream isolation creates independent circuits for different applications to prevent cross-service identity correlation:
+Tor stream isolation creates independent circuits for distinct applications to prevent cross-service identity correlation:
+
+```mermaid
+flowchart TD
+    subgraph VM["Debian Anon-VM"]
+        Browser["Tor Browser / Web"] -->|SOCKS5 :9050| CircuitA["Circuit A (Entry -> Middle -> Exit 1)"]
+        Wallet["Crypto Wallet / Financial"] -->|SOCKS5 :9051| CircuitB["Circuit B (Entry -> Middle -> Exit 2)"]
+        Automation["CLI / Automated Scripts"] -->|SOCKS5 :9052| CircuitC["Circuit C (Entry -> Middle -> Exit 3)"]
+    end
+    
+    CircuitA --> SiteA["Target Website A"]
+    CircuitB --> SiteB["Target Service B"]
+    CircuitC --> SiteC["Target API C"]
+```
 
 | SOCKS5 Port | Isolation Policy | Recommended Use Case |
 | :--- | :--- | :--- |
@@ -134,7 +142,7 @@ Tor's stream isolation creates independent circuits for different applications t
 # Query endpoint A via isolated circuit
 curl --socks5-hostname 127.0.0.1:9051 https://api-a.com
 
-# Query endpoint B via completely different circuit & exit IP
+# Query endpoint B via completely different circuit and exit IP
 curl --socks5-hostname 127.0.0.1:9052 https://api-b.com
 ```
 
@@ -142,7 +150,7 @@ curl --socks5-hostname 127.0.0.1:9052 https://api-b.com
 
 ## Threat Boundaries & Comparison
 
-| Vector | Tails OS (Live USB) | Whonix (2 VMs) | Debian Anon-VM (This Project) |
+| Security Vector | Tails OS (Live USB) | Whonix (2 VMs) | Debian Anon-VM (This Project) |
 | :--- | :--- | :--- | :--- |
 | **Storage Security** | Encrypted Persistent Volume | Optional | **LUKS2 Full Disk Encryption** |
 | **Tor Routing** | iptables/nftables | Hypervisor Gateway | **Fail-Closed nftables** |
@@ -158,11 +166,11 @@ For in-depth threat modeling and test cases, see [docs/THREAT_MODEL.md](docs/THR
 
 ## Documentation
 
-* 📖 [Software Design Document (SDD) & Architecture](docs/ARCHITECTURE.md)
-* 🛡️ [Threat Model & Acceptance Test Matrix](docs/THREAT_MODEL.md)
-* 🖥️ [Hypervisor Configuration Guide (UTM, VirtualBox, KVM)](docs/HYPERVISORS.md)
-* 🔒 [Security Policy & Vulnerability Disclosure](SECURITY.md)
-* 🤝 [Contributing Guidelines](CONTRIBUTING.md)
+* [Software Design Document & Architecture](docs/ARCHITECTURE.md)
+* [Threat Model & Acceptance Test Matrix](docs/THREAT_MODEL.md)
+* [Hypervisor Configuration Guide (UTM, VirtualBox, KVM)](docs/HYPERVISORS.md)
+* [Security Policy & Vulnerability Disclosure](SECURITY.md)
+* [Contributing Guidelines](CONTRIBUTING.md)
 
 ---
 

@@ -1,6 +1,6 @@
 # Hypervisor Configuration Guide
 
-To maximize security, privacy, and performance when running **`debian-anon-vm`**, configure your hypervisor according to these recommendations:
+To maximize security, privacy, and performance when running `debian-anon-vm`, configure your hypervisor according to these engineering guidelines:
 
 ---
 
@@ -8,14 +8,14 @@ To maximize security, privacy, and performance when running **`debian-anon-vm`**
 
 * **Architecture:** ARM64 (Apple Silicon) or x86_64 (Intel).
 * **Network Mode:** Set network mode to **Shared Network (NAT)**.
-  * *Why:* Isolates the VM from local broadcast domains and prevents LAN devices from directly reaching the VM.
+  * *Rationale:* Isolates the VM from local broadcast domains and prevents LAN devices from directly reaching the VM.
 * **Entropy Device (`virtio-rng`):**
   * Under VM Settings -> Devices -> Ensure **VirtIO RNG** is enabled.
-  * *Why:* Prevents entropy starvation inside the VM when Tor generates cryptographic circuit keys.
+  * *Rationale:* Prevents entropy starvation inside the VM when Tor generates cryptographic circuit keys.
 * **Clipboard & File Sharing:**
   * Clipboard Sharing: **Disabled** or **Host to Guest Only**.
   * Directory Sharing (VirtFS/WebDAV): **Disabled**.
-  * *Why:* Prevents compromised processes inside the VM from exfiltrating clipboard contents or host directory metadata.
+  * *Rationale:* Prevents compromised processes inside the VM from exfiltrating clipboard contents or host directory metadata.
 
 ---
 

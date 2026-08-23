@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="1.3.0"
+VERSION="1.3.1"
 
 # =============================================================================
 # Global Configurations & File Paths
@@ -60,6 +60,17 @@ PASS_COUNT=0
 SKIP_COUNT=0
 WARN_COUNT=0
 FAIL_COUNT=0
+
+# Temp file registry for safe signal handling
+TMP_FILES=()
+
+cleanup()
+{
+    for tmp in "${TMP_FILES[@]}"; do
+        [[ -f "$tmp" ]] && rm -f "$tmp"
+    done
+}
+trap cleanup EXIT INT TERM
 
 # =============================================================================
 # Output & Color Formatting
@@ -191,6 +202,7 @@ cmd_setup()
 
     local tmp_torrc
     tmp_torrc="$(mktemp)"
+    TMP_FILES+=("$tmp_torrc")
 
     cat << EOF > "$tmp_torrc"
 # =============================================================================
@@ -260,6 +272,7 @@ EOF
 
     local tmp_nft
     tmp_nft="$(mktemp)"
+    TMP_FILES+=("$tmp_nft")
 
     cat << EOF > "$tmp_nft"
 #!/usr/sbin/nft -f
@@ -333,7 +346,10 @@ table ip tor_filter {
         ip daddr ${LAN_SUBNET} accept
         ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } accept
 
-        # 4. Explicitly drop all non-Tor ICMP and UDP to prevent leaks
+        # 4. Allow DHCP lease renewal queries on local interface
+        udp sport 68 udp dport 67 accept
+
+        # 5. Explicitly drop all non-Tor ICMP and UDP to prevent leaks
         ip protocol icmp drop
         ip protocol udp drop
     }
@@ -477,8 +493,8 @@ EOF
 
     # 2. User & Session Hardening
     step "2. Hardening user sessions, umask, and sudo"
-    if grep -q "^UMASK" "$LOGIN_DEFS" 2>/dev/null; then
-        run sed -i 's/^UMASK.*/UMASK\t\t027/' "$LOGIN_DEFS"
+    if grep -qE "^#*[[:space:]]*UMASK" "$LOGIN_DEFS" 2>/dev/null; then
+        run sed -i 's/^#*[[:space:]]*UMASK.*/UMASK\t\t027/' "$LOGIN_DEFS"
     else
         run printf 'UMASK\t\t027\n' >> "$LOGIN_DEFS"
     fi
@@ -672,6 +688,12 @@ EOF
 
 cmd_check()
 {
+    # Reset audit counters to prevent pollution from previous setup/harden steps
+    PASS_COUNT=0
+    WARN_COUNT=0
+    FAIL_COUNT=0
+    SKIP_COUNT=0
+
     step "Anon-VM Security, Leak Detection & Hardening Audit"
 
     # Section 1: SOCKS Port
@@ -845,14 +867,26 @@ cmd_status()
     local nft_active
     nft_active="$(systemctl is-active nftables 2>/dev/null || echo 'inactive')"
 
-    info "Tor Service      : $is_active"
-    info "nftables Firewall: $nft_active"
+    info "Tor Service Status    : $is_active"
+    info "nftables Firewall     : $nft_active"
 
     if [[ "$is_active" == "active" ]]; then
+        local tor_pid
+        tor_pid="$(systemctl show --property MainPID --value tor@default 2>/dev/null || echo '')"
+        [[ -n "$tor_pid" && "$tor_pid" != "0" ]] && info "Tor Main PID          : $tor_pid"
+
         local current_ip
         current_ip="$(curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 https://check.torproject.org/api/ip 2>/dev/null | grep -o '"IP":"[^"]*' | cut -d'"' -f4 || echo 'Unavailable')"
-        info "Current Exit IP  : $current_ip"
-        info "Timezone         : $(timedatectl show --property=Timezone --value 2>/dev/null || echo 'unknown')"
+        info "Active Tor Exit IP    : $current_ip"
+        info "System Timezone       : $(timedatectl show --property=Timezone --value 2>/dev/null || echo 'unknown')"
+
+        local boot_log
+        boot_log="$(journalctl -u tor@default.service -n 20 --no-pager 2>/dev/null | grep "Bootstrapped 100%" | tail -n 1 || echo '')"
+        if [[ -n "$boot_log" ]]; then
+            info "Bootstrap State       : 100% (Operational)"
+        else
+            info "Bootstrap State       : Active (Review journalctl for progress)"
+        fi
     fi
 }
 
@@ -882,11 +916,12 @@ cmd_rollback()
     done
 
     local latest="${backups[-1]}"
-    info "Restoring latest snapshot: $(basename "$latest")"
+    local clean_latest="${latest%/}"
+    info "Restoring latest snapshot: $(basename "$clean_latest")"
 
-    [[ -f "${latest}/torrc" ]] && cp "${latest}/torrc" "$TORRC" && ok "Restored $TORRC"
-    [[ -f "${latest}/nftables.conf" ]] && cp "${latest}/nftables.conf" "$NFTABLES_CONF" && ok "Restored $NFTABLES_CONF"
-    [[ -f "${latest}/resolv.conf" ]] && cp "${latest}/resolv.conf" "/etc/resolv.conf" && ok "Restored /etc/resolv.conf"
+    [[ -f "${clean_latest}/torrc" ]] && cp "${clean_latest}/torrc" "$TORRC" && ok "Restored $TORRC"
+    [[ -f "${clean_latest}/nftables.conf" ]] && cp "${clean_latest}/nftables.conf" "$NFTABLES_CONF" && ok "Restored $NFTABLES_CONF"
+    [[ -f "${clean_latest}/resolv.conf" ]] && cp "${clean_latest}/resolv.conf" "/etc/resolv.conf" && ok "Restored /etc/resolv.conf"
 
     systemctl restart tor@default 2>/dev/null || true
     systemctl restart nftables 2>/dev/null || true
