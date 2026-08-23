@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Unified standalone CLI entrypoint (`anonbox`) supporting `setup`, `harden`, `check`, `all`, `status`, `rollback`, and `uninstall`.
 - Pluggable Transports support (`obfs4`, `Snowflake`, `WebTunnel`).
-- Automated signal trapping (`trap cleanup`) for safe temporary file removal.
+- Automated signal trapping (`trap cleanup EXIT INT TERM HUP`) for safe temporary file removal on terminal drops.
+- Pre-flight operating system detection and validation (`validate_os`) for Debian 12 and 13.
 - Native vector Mermaid architecture, DNS flow, and stream isolation diagrams.
 - GitHub Actions CI workflow (`.github/workflows/lint.yml`) for ShellCheck and Markdownlint validation.
 - Issue and Pull Request templates for community contribution.
@@ -20,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Rebranded project from `debian-anon-vm` to `anonbox`.
 - Refined technical documentation tone to meet strict security engineering standards.
+- Enforced `DEBIAN_FRONTEND=noninteractive` across all package manager operations for unattended/CI execution.
 
 ### Fixed
 

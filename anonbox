@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="1.6.0"
+VERSION="1.7.0"
 
 # =============================================================================
 # Global Configurations & File Paths
@@ -75,7 +75,7 @@ cleanup()
         [[ -f "$tmp" ]] && rm -f "$tmp"
     done
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT INT TERM HUP
 
 # =============================================================================
 # Output & Color Formatting
@@ -115,6 +115,19 @@ require_root()
 {
     if [[ "$(id -u)" -ne 0 ]]; then
         die "This command requires root privileges. Please run with sudo."
+    fi
+}
+
+validate_os()
+{
+    if [[ -f "/etc/os-release" ]]; then
+        # shellcheck disable=SC1091
+        source "/etc/os-release"
+        local os_id="${ID:-}"
+        local os_like="${ID_LIKE:-}"
+        if [[ "$os_id" != "debian" && "$os_like" != *"debian"* ]]; then
+            warn "Target OS appears to be '$os_id'. anonbox is designed and tested for Debian GNU/Linux 12 (Bookworm) and 13 (Trixie)."
+        fi
     fi
 }
 
@@ -177,6 +190,7 @@ backup_file()
 cmd_setup()
 {
     require_root
+    validate_os
     step "Starting anonbox Setup Pipeline"
     detect_network
 
@@ -192,9 +206,9 @@ cmd_setup()
         pkgs+=(lyrebird)
     fi
 
-    run apt-get update -q
-    run apt-get install -y -q "${pkgs[@]}"
-    run apt-get purge -y -q popularity-contest 2>/dev/null || true
+    run env DEBIAN_FRONTEND=noninteractive apt-get update -q
+    run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${pkgs[@]}"
+    run env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q popularity-contest 2>/dev/null || true
     ok "Required packages installed and popularity-contest purged"
 
     # 2. Configure /etc/tor/torrc
@@ -440,6 +454,7 @@ EOF
 cmd_harden()
 {
     require_root
+    validate_os
     step "Starting anonbox Hardening Pipeline (Tails, Kicksecure & KSPP standards)"
     detect_network
 
@@ -640,7 +655,7 @@ EOF
     # 7. AppArmor
     step "7. Enforcing AppArmor"
     local app_pkgs=(apparmor apparmor-utils apparmor-profiles apparmor-profiles-extra)
-    run apt-get install -y -q "${app_pkgs[@]}" 2>/dev/null || true
+    run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${app_pkgs[@]}" 2>/dev/null || true
     run systemctl enable --now apparmor 2>/dev/null || true
     if command -v aa-enforce >/dev/null 2>&1; then
         run aa-enforce /etc/apparmor.d/*tor* 2>/dev/null || true
@@ -649,7 +664,7 @@ EOF
 
     # 8. Anti-Fingerprinting & Telemetry Suppression
     step "8. Anti-Fingerprinting, Machine-ID Standardizing & Telemetry Suppression"
-    run apt-get install -y -q macchanger htpdate 2>/dev/null || true
+    run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q macchanger htpdate 2>/dev/null || true
 
     # Native NetworkManager MAC Randomization & DHCP Privacy
     run mkdir -p /etc/NetworkManager/conf.d 2>/dev/null || true
@@ -781,9 +796,12 @@ cmd_check()
     section "3" "Testing DNS Leak Prevention"
     if command -v dig >/dev/null 2>&1; then
         local dns_ip
-        dns_ip="$(dig +short @127.0.0.1 -p 5353 whoami.akamai.net 2>/dev/null || echo '')"
+        dns_ip="$(dig +short @127.0.1.1 -p 53 whoami.akamai.net 2>/dev/null || echo '')"
+        if [[ -z "$dns_ip" ]]; then
+            dns_ip="$(dig +short @127.0.0.1 -p 5353 whoami.akamai.net 2>/dev/null || echo '')"
+        fi
         if [[ -n "$dns_ip" ]]; then
-            pass "Tor DNSPort 5353 resolved query via Tor node: $dns_ip"
+            pass "Tor DNS resolved query via Tor node: $dns_ip"
         else
             warn "Tor DNSPort did not return whoami.akamai.net response"
         fi
@@ -915,6 +933,7 @@ cmd_check()
 cmd_all()
 {
     require_root
+    validate_os
     step "Running Full Pipeline: setup -> harden -> check"
     cmd_setup
     cmd_harden
