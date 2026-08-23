@@ -173,6 +173,7 @@ For in-depth threat modeling and test cases, see [docs/THREAT_MODEL.md](docs/THR
 * [Hypervisor Configuration Guide (UTM, VirtualBox, KVM)](docs/HYPERVISORS.md)
 * [Security Policy & Vulnerability Disclosure](SECURITY.md)
 * [Contributing Guidelines](CONTRIBUTING.md)
+* [Changelog](CHANGELOG.md)
 
 ---
 
