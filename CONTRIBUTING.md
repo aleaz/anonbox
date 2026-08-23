@@ -1,6 +1,6 @@
-# Contributing to debian-anon-vm
+# Contributing to anonbox
 
-Thank you for your interest in improving `debian-anon-vm`! We welcome contributions from developers, security researchers, and privacy advocates.
+Thank you for your interest in improving `anonbox`! We welcome contributions from developers, security researchers, and privacy advocates.
 
 ## Code of Conduct
 
@@ -12,7 +12,7 @@ Please treat everyone with respect and empathy. We are committed to providing a 
 
 ### 1. Reporting Bugs & Feature Requests
 
-* Search existing [Issues](https://github.com/aleaz/debian-anon-vm/issues) to avoid duplicates.
+* Search existing [Issues](https://github.com/aleaz/anonbox/issues) to avoid duplicates.
 * Use the provided issue templates for [Bug Reports](.github/ISSUE_TEMPLATE/bug_report.md) or [Feature Requests](.github/ISSUE_TEMPLATE/feature_request.md).
 * For security-sensitive issues or traffic leaks, please follow [SECURITY.md](SECURITY.md).
 
@@ -28,8 +28,8 @@ Please treat everyone with respect and empathy. We are committed to providing a 
 3. Test your changes using `--dry-run` and the built-in test suite:
 
    ```bash
-   bash -n anon-vm
-   sudo ./anon-vm check
+   bash -n anonbox
+   sudo ./anonbox check
    ```
 
 4. Commit your changes with clear, descriptive commit messages:
@@ -44,7 +44,7 @@ Please treat everyone with respect and empathy. We are committed to providing a 
 
 ## Coding Standards
 
-### Bash Scripts (`anon-vm`)
+### Bash Scripts (`anonbox`)
 
 * **Strict Mode:** Always use `set -euo pipefail`.
 * **Portability:** Scripts must run on standard Debian GNU/Linux 12 (Bookworm) and 13 (Trixie) across both `ARM64` (Apple Silicon) and `x86_64` architectures.
@@ -53,7 +53,7 @@ Please treat everyone with respect and empathy. We are committed to providing a 
 * **Linting:** Code must pass `shellcheck` with zero errors or warnings:
 
   ```bash
-  shellcheck anon-vm
+  shellcheck anonbox
   ```
 
 ### Documentation

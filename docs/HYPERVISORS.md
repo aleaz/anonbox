@@ -1,6 +1,6 @@
 # Hypervisor Configuration Guide
 
-To maximize security, privacy, and performance when running `debian-anon-vm`, configure your hypervisor according to these engineering guidelines:
+To maximize security, privacy, and performance when running `anonbox`, configure your hypervisor according to these engineering guidelines:
 
 ---
 
@@ -41,7 +41,7 @@ To maximize security, privacy, and performance when running `debian-anon-vm`, co
 
 For pseudo-amnesic operation (similar to Tails):
 
-1. Complete setup and hardening: `sudo ./anon-vm all`.
+1. Complete setup and hardening: `sudo ./anonbox all`.
 2. Power off the VM cleanly.
 3. Take a baseline snapshot in your hypervisor named **`CLEAN_ANON_BASELINE`**.
 4. After completing sensitive operations, discard changes and revert to **`CLEAN_ANON_BASELINE`** with one click.

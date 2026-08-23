@@ -1,6 +1,6 @@
 # Software Design Document & System Architecture
 
-## Self-Hosted Anonymous Operating System in a Virtual Machine (Debian Anon-VM)
+## Self-Hosted Anonymous Operating System in a Virtual Machine (`anonbox`)
 
 * **Document:** `docs/ARCHITECTURE.md`
 * **Target Operating System:** Debian GNU/Linux 12 (Bookworm) and 13 (Trixie) [ARM64 / x86_64]
@@ -11,14 +11,14 @@
 
 ## 1. System Overview & Philosophy
 
-The objective of `debian-anon-vm` is to transform a standard minimal installation of Debian GNU/Linux (12 or 13) into an isolated, hardened, fail-closed anonymous virtual workstation. All non-local network traffic (TCP and DNS) is strictly routed through the Tor network, while non-Tor egress (IPv6, raw UDP, ICMP) is destroyed at the kernel level.
+The objective of `anonbox` is to transform a standard minimal installation of Debian GNU/Linux (12 or 13) into an isolated, hardened, fail-closed anonymous virtual workstation. All non-local network traffic (TCP and DNS) is strictly routed through the Tor network, while non-Tor egress (IPv6, raw UDP, ICMP) is destroyed at the kernel level.
 
 ### 1.1. Core Architectural Flow
 
 ```mermaid
 flowchart TD
     subgraph Host["Host Machine (macOS / Linux / Windows)"]
-        subgraph Guest["Anon-VM Guest (Debian 12/13 — LUKS2 Encrypted)"]
+        subgraph Guest["anonbox Guest (Debian 12/13 — LUKS2 Encrypted)"]
             Apps["Applications / CLI / Tor Browser"]
             
             Apps -->|TCP Egress| NFT_NAT["nftables NAT: Redirection"]
@@ -68,7 +68,7 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    subgraph VM["Debian Anon-VM"]
+    subgraph VM["anonbox Workstation"]
         Browser["Tor Browser / Web"] -->|SOCKS5 :9050| CircuitA["Circuit A (Entry -> Middle -> Exit 1)"]
         Wallet["Crypto Wallet / Financial"] -->|SOCKS5 :9051| CircuitB["Circuit B (Entry -> Middle -> Exit 2)"]
         Automation["CLI / Automated Scripts"] -->|SOCKS5 :9052| CircuitC["Circuit C (Entry -> Middle -> Exit 3)"]
@@ -79,7 +79,7 @@ flowchart TD
     CircuitC --> SiteC["Target API C"]
 ```
 
-Rather than pooling all application traffic through a single Tor circuit, `anon-vm` provides multiple isolated SOCKS ports in `/etc/tor/torrc`:
+Rather than pooling all application traffic through a single Tor circuit, `anonbox` provides multiple isolated SOCKS ports in `/etc/tor/torrc`:
 
 * **Port 9040 (TransPort):** Transparent proxy with `IsolateDestAddr` and `IsolateDestPort`.
 * **Port 9050 (SOCKS):** Default proxy with `IsolateDestAddr` and `IsolateDestPort`.
@@ -113,4 +113,4 @@ Rather than pooling all application traffic through a single Tor circuit, `anon-
 ## 4. Mandatory Pre-requisite: LUKS Full-Disk Encryption
 
 > [!IMPORTANT]
-> Because `debian-anon-vm` is designed as a persistent virtual workstation rather than a RAM-only Live ISO (like Tails), **Full-Disk Encryption (LUKS2)** is mandatory during Debian installation. This ensures that when the VM is powered off, no unencrypted browsing history, private keys, or swap pages remain accessible on the host filesystem.
+> Because `anonbox` is designed as a persistent virtual workstation rather than a RAM-only Live ISO (like Tails), **Full-Disk Encryption (LUKS2)** is mandatory during Debian installation. This ensures that when the VM is powered off, no unencrypted browsing history, private keys, or swap pages remain accessible on the host filesystem.

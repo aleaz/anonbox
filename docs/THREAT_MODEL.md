@@ -1,8 +1,8 @@
 # Threat Model & Security Boundaries
 
-## 1. System Comparison: Tails OS vs Whonix vs Debian Anon-VM
+## 1. System Comparison: Tails OS vs Whonix vs anonbox
 
-| Security Vector | Tails OS (Live USB) | Whonix (2 VMs: Gateway + WS) | Debian Anon-VM (This Project) | Design Status |
+| Security Vector | Tails OS (Live USB) | Whonix (2 VMs: Gateway + WS) | anonbox (This Project) | Design Status |
 | :--- | :--- | :--- | :--- | :--- |
 | **Storage Encryption** | LUKS (Persistent Volume) | Optional inside VM | **LUKS2 (Mandatory Pre-requisite)** | **IN-SCOPE (Mandatory)** |
 | **Tor Routing** | iptables/nftables | Hypervisor-isolated Gateway | **Local Fail-Closed nftables** | **IN-SCOPE (Mandatory)** |
@@ -19,7 +19,7 @@
 
 ## 2. In-Scope vs Out-of-Scope Threat Boundaries
 
-### In-Scope (Mitigated by `debian-anon-vm`)
+### In-Scope (Mitigated by `anonbox`)
 
 1. **Accidental Clearnet Leaks:** All outbound TCP and DNS traffic from any application (curl, git, apt, custom scripts) is captured and sent over Tor. Non-Tor protocols (UDP, ICMP) and IPv6 are dropped.
 2. **Network Observer Correlation:** The local ISP or network monitor only observes encrypted traffic to a single Tor guard node or obfs4 bridge.
@@ -37,7 +37,7 @@
 
 ## 3. Acceptance Test Matrix (Leak & Hardening Matrix)
 
-Every release of `debian-anon-vm` must pass 100% of the following verification checks:
+Every release of `anonbox` must pass 100% of the following verification checks:
 
 | ID | Test Name | Verification Command | Expected Result |
 | :--- | :--- | :--- | :--- |

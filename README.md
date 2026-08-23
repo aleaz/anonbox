@@ -1,10 +1,12 @@
-# Debian Anon-VM (`debian-anon-vm`)
+# anonbox
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Debian: 12 | 13](https://img.shields.io/badge/Debian-12%20(Bookworm)%20%7C%2013%20(Trixie)-red.svg)](https://www.debian.org/)
 [![Tor: Transparent Proxy](https://img.shields.io/badge/Tor-Transparent%20Proxy-purple.svg)](https://www.torproject.org/)
 [![Security: Hardened](https://img.shields.io/badge/Hardening-KSPP%20%7C%20Tails%20%7C%20Whonix-green.svg)](docs/ARCHITECTURE.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
+Self-hosted, hardened Tor workstation for Debian VMs with encrypted persistence and fail-closed leak prevention.
 
 Transform a clean **Debian GNU/Linux 12 (Bookworm) or 13 (Trixie)** installation into an **isolated, hardened, fail-closed anonymous operating system** running inside a virtual machine (UTM, VirtualBox, KVM).
 
@@ -35,7 +37,7 @@ Transform a clean **Debian GNU/Linux 12 (Bookworm) or 13 (Trixie)** installation
 ```mermaid
 flowchart TD
     subgraph Host["Host Machine (macOS / Linux / Windows)"]
-        subgraph Guest["Anon-VM Guest (Debian 12/13 — LUKS2 Encrypted)"]
+        subgraph Guest["anonbox Guest (Debian 12/13 — LUKS2 Encrypted)"]
             Apps["Applications / CLI / Tor Browser"]
             
             Apps -->|TCP Egress| NFT_NAT["nftables NAT: Redirection"]
@@ -72,14 +74,14 @@ flowchart TD
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/aleaz/debian-anon-vm.git
-cd debian-anon-vm
+git clone https://github.com/aleaz/anonbox.git
+cd anonbox
 
 # 2. Run full automated pipeline (Setup + Hardening + Security Audit)
-sudo ./anon-vm all
+sudo ./anonbox all
 
 # 3. (Optional: Use obfs4 bridges file)
-sudo ./anon-vm all --bridges-file /path/to/my-bridges.txt
+sudo ./anonbox all --bridges-file /path/to/my-bridges.txt
 
 # 4. Reboot to apply all kernel sysctl, GRUB memory sanitization and mount options
 sudo reboot
@@ -87,28 +89,28 @@ sudo reboot
 
 ---
 
-## CLI Command Reference (`anon-vm`)
+## CLI Command Reference (`anonbox`)
 
-The `anon-vm` toolkit provides a unified, modular, and idempotent interface:
+The `anonbox` toolkit provides a unified, modular, and idempotent interface:
 
 ```bash
 # Setup Tor transparent proxy, nftables firewall, and DNS routing
-sudo ./anon-vm setup [--bridges-file FILE | --no-bridges] [--iface IFACE]
+sudo ./anonbox setup [--bridges-file FILE | --no-bridges] [--iface IFACE]
 
 # Apply comprehensive OS, Kernel (Yama, GRUB, sysctl), user & filesystem hardening
-sudo ./anon-vm harden [--iface IFACE] [--dry-run]
+sudo ./anonbox harden [--iface IFACE] [--dry-run]
 
 # Run the 12-section security, leak detection, and hardening audit suite
-sudo ./anon-vm check
+sudo ./anonbox check
 
 # Show current Tor connection health, circuits, and public exit IP
-./anon-vm status
+./anonbox status
 
 # Rollback configuration to a previous snapshot
-sudo ./anon-vm rollback
+sudo ./anonbox rollback
 
-# Uninstall Anon-VM and restore standard clearnet networking
-sudo ./anon-vm uninstall
+# Uninstall anonbox and restore standard clearnet networking
+sudo ./anonbox uninstall
 ```
 
 ---
@@ -119,7 +121,7 @@ Tor stream isolation creates independent circuits for distinct applications to p
 
 ```mermaid
 flowchart TD
-    subgraph VM["Debian Anon-VM"]
+    subgraph VM["anonbox Workstation"]
         Browser["Tor Browser / Web"] -->|SOCKS5 :9050| CircuitA["Circuit A (Entry -> Middle -> Exit 1)"]
         Wallet["Crypto Wallet / Financial"] -->|SOCKS5 :9051| CircuitB["Circuit B (Entry -> Middle -> Exit 2)"]
         Automation["CLI / Automated Scripts"] -->|SOCKS5 :9052| CircuitC["Circuit C (Entry -> Middle -> Exit 3)"]
@@ -150,7 +152,7 @@ curl --socks5-hostname 127.0.0.1:9052 https://api-b.com
 
 ## Threat Boundaries & Comparison
 
-| Security Vector | Tails OS (Live USB) | Whonix (2 VMs) | Debian Anon-VM (This Project) |
+| Security Vector | Tails OS (Live USB) | Whonix (2 VMs) | anonbox (This Project) |
 | :--- | :--- | :--- | :--- |
 | **Storage Security** | Encrypted Persistent Volume | Optional | **LUKS2 Full Disk Encryption** |
 | **Tor Routing** | iptables/nftables | Hypervisor Gateway | **Fail-Closed nftables** |

@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an idea or hardening enhancement
+about: Suggest an idea or hardening enhancement for anonbox
 title: '[FEATURE] '
 labels: enhancement
 assignees: ''

@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Create a report to help us improve debian-anon-vm
+about: Create a report to help us improve anonbox
 title: '[BUG] '
 labels: bug
 assignees: ''
@@ -19,7 +19,7 @@ A clear and concise description of what the bug is.
 
 ## Steps to Reproduce
 
-1. Run command `sudo ./anon-vm ...`
+1. Run command `sudo ./anonbox ...`
 2. See error output...
 
 ## Expected Behavior
