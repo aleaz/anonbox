@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="1.4.1"
+VERSION="1.5.0"
 
 # =============================================================================
 # Global Configurations & File Paths
@@ -20,8 +20,11 @@ VERSION="1.4.1"
 TORRC="/etc/tor/torrc"
 TOR_DEFAULTS="/usr/share/tor/tor-service-defaults-torrc"
 NFTABLES_CONF="/etc/nftables.conf"
+NFTABLES_OVERRIDE="/etc/systemd/system/nftables.service.d/override.conf"
 SYSCTL_FILE="/etc/sysctl.d/99-tor-hardening.conf"
 MAC_SERVICE="/etc/systemd/system/macchanger@.service"
+NM_MAC_CONF="/etc/NetworkManager/conf.d/00-mac-randomize.conf"
+NM_DNS_CONF="/etc/NetworkManager/conf.d/no-dns.conf"
 HTPDATE_SERVICE="/etc/systemd/system/htpdate-tor.service"
 BACKUP_DIR="/var/backups/anonbox"
 
@@ -317,8 +320,8 @@ table ip tor_filter {
         icmp type address-mask-request drop
         icmp type echo-request accept
 
-        # Allow local LAN admin SSH (port 22)
-        ip saddr ${LAN_SUBNET} tcp dport 22 accept
+        # Allow local LAN admin SSH (port 22) across private ranges
+        ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport 22 accept
     }
 
     chain forward {
@@ -362,10 +365,22 @@ EOF
         die "nftables configuration validation failed!"
     fi
 
-    # 4. Configure robust DNS in /etc/resolv.conf without chattr breaks
+    # 4. Prevent boot race condition via systemd drop-in override
+    step "Arming early boot firewall protection"
+    run mkdir -p /etc/systemd/system/nftables.service.d 2>/dev/null || true
+    run tee "$NFTABLES_OVERRIDE" > /dev/null << 'EOF'
+[Unit]
+Before=network-pre.target shutdown.target
+Wants=network-pre.target
+DefaultDependencies=no
+EOF
+    run systemctl daemon-reload
+    ok "Early boot firewall protection configured (Before=network-pre.target)"
+
+    # 5. Configure robust DNS in /etc/resolv.conf without chattr breaks
     step "Configuring DNS leak protection"
     run mkdir -p /etc/NetworkManager/conf.d 2>/dev/null || true
-    run tee /etc/NetworkManager/conf.d/no-dns.conf > /dev/null << 'EOF'
+    run tee "$NM_DNS_CONF" > /dev/null << 'EOF'
 [main]
 dns=none
 EOF
@@ -380,7 +395,7 @@ options edns0 trust-ad
 EOF
     ok "DNS fixed to 127.0.0.1 (Tor local resolver)"
 
-    # 5. Enable and start services
+    # 6. Enable and start services
     step "Enabling and starting system services"
     run systemctl enable nftables.service
     run systemctl restart nftables.service
@@ -390,7 +405,7 @@ EOF
     run systemctl restart tor@default.service
     ok "Tor service started"
 
-    # 6. Wait for Tor Bootstrap (100%)
+    # 7. Wait for Tor Bootstrap (100%)
     step "Waiting for Tor bootstrap (100%)..."
     local bootstrapped=0
     local elapsed=0
@@ -469,6 +484,9 @@ kernel.dmesg_restrict = 1
 kernel.unprivileged_bpf_disabled = 1
 kernel.perf_event_paranoid = 3
 kernel.sysrq = 0
+
+# Mitigate unprivileged local kernel exploit vectors
+kernel.unprivileged_userns_clone = 0
 
 # Process isolation (Yama LSM: prevent unauthorized ptrace/gdb memory inspection)
 kernel.yama.ptrace_scope = 2
@@ -551,11 +569,14 @@ EOF
     fi
     ok "Core dumps disabled in limits and systemd"
 
-    # 4. Filesystem Mounts
-    step "4. Hardening mounts (/tmp, /dev/shm noexec, /proc hidepid=2)"
+    # 4. Filesystem Mounts (/tmp, /var/tmp, /dev/shm noexec, /proc hidepid=2)
+    step "4. Hardening mounts (/tmp, /var/tmp, /dev/shm noexec, /proc hidepid=2)"
     if [[ -f "$FSTAB" ]]; then
         if ! grep -qE "[[:space:]]/tmp[[:space:]]" "$FSTAB" 2>/dev/null; then
             run printf 'tmpfs /tmp tmpfs defaults,nosuid,nodev,noexec,size=2G 0 0\n' >> "$FSTAB"
+        fi
+        if ! grep -qE "[[:space:]]/var/tmp[[:space:]]" "$FSTAB" 2>/dev/null; then
+            run printf 'tmpfs /var/tmp tmpfs defaults,nosuid,nodev,noexec,size=2G 0 0\n' >> "$FSTAB"
         fi
         if ! grep -qE "[[:space:]]/dev/shm[[:space:]]" "$FSTAB" 2>/dev/null; then
             run printf 'tmpfs /dev/shm tmpfs defaults,nosuid,nodev,noexec 0 0\n' >> "$FSTAB"
@@ -623,11 +644,22 @@ EOF
     fi
     ok "AppArmor enabled and enforced"
 
-    # 8. Anti-Fingerprinting (MAC, UTC, Hostname, Services, Time Sync)
+    # 8. Anti-Fingerprinting (Native NetworkManager MAC, UTC, Hostname, Services, Time Sync)
     step "8. Anti-Fingerprinting and Service Reduction"
     run apt-get install -y -q macchanger htpdate 2>/dev/null || true
 
-    # MAC Randomization service
+    # Native NetworkManager MAC Randomization (Prevents initial DHCP timing leaks)
+    run mkdir -p /etc/NetworkManager/conf.d 2>/dev/null || true
+    run tee "$NM_MAC_CONF" > /dev/null << 'EOF'
+[device]
+wifi.scan-rand-mac-address=yes
+
+[connection]
+ethernet.cloned-mac-address=random
+wifi.cloned-mac-address=random
+EOF
+
+    # MAC Randomization service for standalone interfaces
     run tee "$MAC_SERVICE" > /dev/null << EOF
 [Unit]
 Description=MAC address randomization for %I
@@ -952,8 +984,11 @@ cmd_uninstall()
     run systemctl disable --now tor@default 2>/dev/null || true
     ok "Tor service stopped"
 
-    # 3. Restore NetworkManager DNS
-    run rm -f /etc/NetworkManager/conf.d/no-dns.conf
+    # 3. Restore NetworkManager DNS and MAC
+    run rm -f "$NM_DNS_CONF"
+    run rm -f "$NM_MAC_CONF"
+    run rm -f "$NFTABLES_OVERRIDE"
+    run systemctl daemon-reload
     run systemctl restart NetworkManager 2>/dev/null || true
 
     # 4. Remove sysctl hardening if requested

@@ -27,10 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced static `sleep 20` in `htpdate-tor.service` with deterministic SOCKS port 9050 readiness polling.
 - Fixed audit counter isolation in `cmd_check()` to prevent cumulative counter pollution when running `anonbox all`.
 - Fixed `/etc/resolv.conf` replacement to ensure `systemd-resolved` symlinks are removed before writing static nameserver configuration.
+- Closed boot race condition by asserting `Before=network-pre.target` in `nftables.service.d/override.conf`.
 
 ### Security
 
+- **Anti-Fingerprint:** Added native NetworkManager MAC address randomization (`cloned-mac-address=random`) to prevent initial DHCP timing leaks.
 - **Firewall:** Eliminated blanket RFC 1918 LAN egress bypass, restricting LAN interactions strictly to established inbound SSH replies.
 - **Network Stack:** Disabled TCP timestamps (`net.ipv4.tcp_timestamps = 0`) to eliminate microsecond clock-skew de-anonymization.
-- **Kernel:** Enforced full ASLR (`kernel.randomize_va_space = 2`) and disabled runtime kernel execution replacement (`kernel.kexec_load_disabled = 1`).
+- **Kernel:** Enforced full ASLR (`kernel.randomize_va_space = 2`), disabled runtime kernel execution replacement (`kernel.kexec_load_disabled = 1`), and disabled unprivileged user namespaces (`kernel.unprivileged_userns_clone = 0`).
+- **Filesystem Hardening:** Hardened `/var/tmp` with `noexec,nosuid,nodev` alongside `/tmp` and `/dev/shm`.
 - **Surface Reduction:** Expanded modprobe blacklist with `bluetooth`, `btusb`, `vivid`, and legacy network protocol handlers.
