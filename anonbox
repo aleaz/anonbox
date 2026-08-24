@@ -244,9 +244,9 @@ cmd_setup()
         show_system_summary
     fi
 
-    # 1. Install packages and purge telemetry
+    # 1. Installing required packages and purging Debian telemetry
     step "1. Installing required packages and purging Debian telemetry"
-    local pkgs=(tor obfs4proxy nftables curl dnsutils netcat-openbsd iproute2)
+    local pkgs=(tor obfs4proxy nftables curl dnsutils netcat-openbsd iproute2 apparmor apparmor-utils apparmor-profiles apparmor-profiles-extra macchanger htpdate)
     
     if apt-cache show lyrebird >/dev/null 2>&1; then
         pkgs+=(lyrebird)
@@ -312,10 +312,12 @@ cmd_setup()
 VirtualAddrNetworkIPv4 10.192.0.0/10
 AutomapHostsOnResolve 1
 TransPort 127.0.0.1:9040 IsolateDestAddr IsolateDestPort
+TransPort 0.0.0.0:9040 IsolateDestAddr IsolateDestPort
 TransProxyType default
 
 # --- DNS Resolution via Tor ---
 DNSPort 127.0.0.1:5353
+DNSPort 0.0.0.0:5353
 
 # --- SOCKS Ports & Stream Isolation ---
 SocksPort 127.0.0.1:9050 IsolateDestAddr IsolateDestPort
@@ -339,21 +341,18 @@ ClientTransportPlugin webtunnel exec ${pt_binary}
 ClientTransportPlugin snowflake exec ${pt_binary}
 EOF
 
-    # Configure Bridges if provided
-    if [[ -n "$BRIDGES_FILE" && -f "$BRIDGES_FILE" ]]; then
+    # Inject bridges if supplied
+    if [[ -n "$BRIDGES_FILE" ]]; then
+        if [[ ! -f "$BRIDGES_FILE" ]]; then
+            die "Specified bridges file does not exist: $BRIDGES_FILE"
+        fi
         info "Injecting obfs4/transport bridges from $BRIDGES_FILE"
-        echo "" >> "$tmp_torrc"
-        echo "UseBridges 1" >> "$tmp_torrc"
-        local bridge_count=0
-        while IFS= read -r line; do
-            [[ -z "$line" || "$line" =~ ^# ]] && continue
-            echo "$line" >> "$tmp_torrc"
-            ((bridge_count++)) || true
-        done < "$BRIDGES_FILE"
-        vinfo "Total active bridge lines injected: $bridge_count"
-    elif (( NO_BRIDGES == 0 )); then
-        info "No bridge file provided. Connecting directly (or configure in $TORRC)"
-        echo "# UseBridges 1" >> "$tmp_torrc"
+        printf '\n# --- Injected Bridges ---\nUseBridges 1\n' >> "$tmp_torrc"
+        grep -vE '^\s*(#|$)' "$BRIDGES_FILE" >> "$tmp_torrc" || true
+    elif (( NO_BRIDGES == 1 )); then
+        vinfo "Direct connection specified (--no-bridges)"
+    else
+        info "No bridge file provided. Connecting directly (or configure in /etc/tor/torrc)"
     fi
 
     # Validate Tor configuration
@@ -401,7 +400,13 @@ table ip tor_nat {
         oifname "lo" return
         skuid ${TOR_UID} return
 
-        # 3. Redirect all remaining outbound TCP traffic to Tor TransPort (9040)
+        # 3. Redirect .onion virtual mapped range to Tor TransPort
+        ip daddr 10.192.0.0/10 ip protocol tcp redirect to :9040
+
+        # 4. Don't redirect local LAN traffic
+        ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } return
+
+        # 5. Redirect all remaining outbound TCP traffic to Tor TransPort (9040)
         ip protocol tcp redirect to :9040
     }
 }
@@ -842,7 +847,16 @@ EOF
     # 7. AppArmor
     step "7. Enforcing AppArmor"
     local app_pkgs=(apparmor apparmor-utils apparmor-profiles apparmor-profiles-extra)
-    run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${app_pkgs[@]}" 2>/dev/null || true
+    local missing_app=()
+    for ap in "${app_pkgs[@]}"; do
+        if ! dpkg -s "$ap" >/dev/null 2>&1; then
+            missing_app+=("$ap")
+        fi
+    done
+    if [[ ${#missing_app[@]} -gt 0 ]]; then
+        vinfo "Installing missing AppArmor packages: ${missing_app[*]}"
+        run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${missing_app[@]}" 2>/dev/null || true
+    fi
     run systemctl enable --now apparmor 2>/dev/null || true
     if command -v aa-enforce >/dev/null 2>&1; then
         run aa-enforce /etc/apparmor.d/*tor* 2>/dev/null || true
@@ -851,7 +865,17 @@ EOF
 
     # 8. Anti-Fingerprinting & Telemetry Suppression
     step "8. Anti-Fingerprinting, Machine-ID Standardizing & Telemetry Suppression"
-    run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q macchanger htpdate 2>/dev/null || true
+    local priv_pkgs=(macchanger htpdate)
+    local missing_priv=()
+    for pp in "${priv_pkgs[@]}"; do
+        if ! dpkg -s "$pp" >/dev/null 2>&1; then
+            missing_priv+=("$pp")
+        fi
+    done
+    if [[ ${#missing_priv[@]} -gt 0 ]]; then
+        vinfo "Installing missing privacy packages: ${missing_priv[*]}"
+        run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${missing_priv[@]}" 2>/dev/null || true
+    fi
 
     # Native NetworkManager MAC Randomization & DHCP Privacy
     run mkdir -p /etc/NetworkManager/conf.d 2>/dev/null || true
