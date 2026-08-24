@@ -730,19 +730,6 @@ EOF
     run chmod 0440 "$SUDOERS_HARDENING"
     ok "Sudoers hardened (use_pty, 5m timeout)"
 
-    # Restrict su command
-    if [[ -f "$PAM_SU" ]]; then
-        backup_file "$PAM_SU"
-        if grep -q "pam_wheel.so" "$PAM_SU" 2>/dev/null; then
-            run sed -i 's/^#*[[:space:]]*auth[[:space:]]*required[[:space:]]*pam_wheel\.so.*/auth required pam_wheel.so use_uid/' "$PAM_SU"
-        else
-            run tee -a "$PAM_SU" > /dev/null << 'EOF'
-auth required pam_wheel.so use_uid
-EOF
-        fi
-        ok "su command restricted to sudo/wheel group (/etc/pam.d/su)"
-    fi
-
     # 3. Disable Core Dumps
     step "3. Disabling core dumps"
     backup_file "$LIMITS_COREDUMP"

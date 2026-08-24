@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Removed `pam_wheel.so` restriction on `/etc/pam.d/su` to ensure standard Debian users without `sudo` privileges can elevate using `su -`.
 - Fixed AppArmor Tor containment crash by deploying `/etc/apparmor.d/local/system_tor` whitelist for pluggable transport binaries (`obfs4proxy`, `lyrebird`, `snowflake-client`) and operational logfiles.
 - Fixed Debian 13 (Trixie) package detection by adding `bind9-dnsutils` resolution, preventing false-positive APT updates under active fail-closed firewall.
 - Fixed Transparent TCP Proxying by configuring `TransPort` and `DNSPort` on `0.0.0.0` in addition to `127.0.0.1`, allowing redirected packets with outgoing interface IPs to be accepted and proxied through Tor.
