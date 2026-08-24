@@ -4,7 +4,7 @@
 
 ## *Turn any Debian VM into an isolated, fail-closed, hardened Tor workstation.*
 
-[![Release](https://img.shields.io/badge/release-v1.0.0-7D4698.svg?style=flat-square&logo=github)](https://github.com/aleaz/anonbox/releases)
+[![Release](https://img.shields.io/badge/release-v1.2.0-candidate-7D4698.svg?style=flat-square&logo=github)](https://github.com/aleaz/anonbox/releases)
 [![Debian: 12 | 13](https://img.shields.io/badge/Debian-12%20(Bookworm)%20%7C%2013%20(Trixie)-D70A53.svg?style=flat-square&logo=debian&logoColor=white)](https://www.debian.org/)
 [![Tor: Transparent Proxy](https://img.shields.io/badge/Tor-Transparent%20Proxy-7D4698.svg?style=flat-square&logo=torproject&logoColor=white)](https://www.torproject.org/)
 [![Hardening: KSPP & Tails](https://img.shields.io/badge/Hardening-KSPP%20%7C%20Tails%20Standard-success.svg?style=flat-square&logo=linux&logoColor=white)](docs/ARCHITECTURE.md)
@@ -27,7 +27,7 @@
 | **Architecture** | `ARM64` (Apple Silicon UTM) and `x86_64` (VirtualBox, KVM, Proxmox) |
 | **Traffic Policy** | 100% Fail-Closed routing through Tor (`nftables` priority drop) |
 | **Security Standards** | KSPP (Kernel Self Protection), Tails OS & Whonix Hardening Patterns |
-| **Storage Security** | Verified LUKS2 Full-Disk Encryption & eCryptfs Persistent Volumes |
+| **Storage Security** | LUKS2 / eCryptfs **required for SAFE** (`check` FAILs without it; lab VMs may lack LUKS) |
 
 ## Quickstart
 
@@ -35,21 +35,27 @@ Get a hardened anonymous workstation running in under 2 minutes:
 
 ```bash
 # 1. Clone the repository inside your clean Debian VM
+# NOTE: this step and the first apt install run over CLEARNET (ISP sees packages).
+# Prefer a preseeded/offline image when that residual matters (see docs/THREAT_MODEL.md).
 git clone https://github.com/aleaz/anonbox.git
 cd anonbox
 
-# 2. Run the automated pipeline (Setup -> Hardening -> 12-Point Security Audit)
+# 2. Run the automated pipeline (Setup -> Hardening -> Security Audit)
 sudo ./anonbox all
 
 # Optional: Connect via obfs4 anti-censorship bridges
 # sudo ./anonbox all --bridges-file /path/to/bridges.txt
+
+# Lab over SSH (keeps RFC1918 SSH): sudo ./anonbox all --allow-ssh
 
 # 3. Reboot to apply kernel sysctl, GRUB memory sanitization, and mount restrictions
 sudo reboot
 ```
 
 > [!IMPORTANT]
-> **Prerequisites:** Clean minimal installation of **Debian 12 or 13** with **LUKS Full-Disk Encryption** enabled during guided partitioning.
+> **Prerequisites:** Clean minimal installation of **Debian 12 or 13**. **LUKS Full-Disk Encryption** is required for `check` to report **SAFE** (lab VMs without LUKS will FAIL storage checks by design).
+>
+> **Product status:** Hardening toolkit / v1.2 **candidate** — not Tails/Whonix. Interactive browsing needs **Tor Browser** (`torbrowser-launcher` when packaged).
 
 ## Why Anonbox?
 
@@ -60,7 +66,7 @@ sudo reboot
 | **Tor Routing** | iptables/nftables | Hypervisor-isolated Gateway | **Local Fail-Closed nftables Kill-Switch** |
 | **Leak Prevention** | Blocked | Blocked | **Kernel-Level Drop (UDP, ICMP, IPv6)** |
 | **Stream Isolation** | Per application | Per SocksPort | **Multi-Port Isolation (9050, 9051, 9052)** |
-| **Anti-Fingerprint** | UTC, MAC, Hostname | Standardized Identity | **UTC, Auto-MAC, Standardized Machine-ID** |
+| **Anti-Fingerprint** | UTC, MAC, Hostname | Standardized Identity | **UTC, hostname, machine-id; NM MAC (not L2 under NAT)** |
 
 ## System Architecture
 
@@ -70,17 +76,17 @@ flowchart TD
         subgraph Guest["anonbox Guest (Debian 12/13 — LUKS2 Encrypted)"]
             Apps["Applications / CLI / Tor Browser"]
             
-            Apps -->|TCP Egress| NFT_NAT["nftables NAT: Redirection"]
+            Apps -->|TCP Egress| NFT_NAT["nftables NAT: redirect to :9040"]
             Apps -->|UDP Port 53| NFT_NAT
             Apps -->|Non-Tor UDP / ICMP / IPv6| NFT_FILTER["nftables Filter: Drop"]
             
-            NFT_NAT -->|TCP to 127.0.0.1:9040| Tor_TransPort["Tor TransPort (:9040)"]
-            NFT_NAT -->|DNS to 127.0.0.1:5353| Tor_DNSPort["Tor DNSPort (:5353)"]
+            NFT_NAT -->|TCP to NIC_IP:9040| Tor_TransPort["Tor TransPort 127.0.0.1 + NIC_IP:9040"]
+            NFT_NAT -->|DNS to NIC_IP:5353| Tor_DNSPort["Tor DNSPort 127.0.0.1 + NIC_IP:5353"]
             
             Tor_TransPort --> Tor_Core["Tor Core Daemon (uid: debian-tor)"]
             Tor_DNSPort --> Tor_Core
             
-            Tor_Core -->|obfs4 / Snowflake / WebTunnel / Direct| Tor_Outbound["Encrypted Tor Traffic"]
+            Tor_Core -->|obfs4 / WebTunnel / Snowflake (if installed) / Direct| Tor_Outbound["Encrypted Tor Traffic"]
         end
         
         Tor_Outbound --> NAT_Adapter["Virtual NAT Adapter"]
@@ -92,17 +98,19 @@ flowchart TD
 
 ## Core Security Pillars
 
-* **100% Fail-Closed Transparent Routing:** All outbound TCP and DNS traffic is redirected to Tor (`TransPort 9040` / `DNSPort 5353`). If the Tor daemon terminates, the firewall blocks 100% of clearnet traffic. Non-Tor UDP, ICMP, and IPv6 packets are dropped at kernel level.
-* **Kernel & Memory Protection:** Memory zeroing on allocation/free (`init_on_alloc=1`, `init_on_free=1` in GRUB), Yama LSM ptrace restriction (`ptrace_scope=2`), TTY command injection mitigation (`legacy_tiocsti=0`), core dumps disabled, and secure `noexec,nosuid,nodev` mounts for `/tmp`, `/var/tmp`, and `/dev/shm`.
-* **Anti-Fingerprinting & Telemetry Suppression:** Forced UTC timezone, MAC address randomization at boot (`macchanger` & NetworkManager), neutral hostname (`localhost`), standardized `/etc/machine-id` pool UUID, and Debian `popularity-contest` purging.
-* **Stream Isolation & Anti-Censorship:** Multi-SOCKS5 circuit isolation (9050, 9051, 9052) preventing traffic correlation across applications, paired with native support for `obfs4`, `Snowflake`, and `WebTunnel` pluggable transports.
+* **100% Fail-Closed Transparent Routing:** All outbound TCP and DNS traffic is nft-`redirect`ed to Tor (`TransPort`/`DNSPort` on `127.0.0.1` and the NIC primary IP — never `0.0.0.0`). INPUT drops new LAN connections to those ports. If Tor terminates, the firewall drops non-Tor egress. Non-Tor UDP, ICMP, and IPv6 are dropped at kernel level.
+* **Kernel & Memory Protection:** Memory zeroing on allocation/free (`init_on_alloc=1`, `init_on_free=1` in GRUB), Yama LSM ptrace restriction (`ptrace_scope=2`), TTY command injection mitigation (`legacy_tiocsti=0`), core dumps disabled, and secure `noexec,nosuid,nodev` mounts for `/tmp`, `/var/tmp`, and `/dev/shm`. Unprivileged user namespaces stay enabled so Tor Browser's sandbox works.
+* **Identity & Telemetry Suppression:** Forced UTC, NetworkManager cloned-MAC (guest NIC only — **not** L2 anti-FP under hypervisor NAT), neutral hostname (`localhost`), standardized `/etc/machine-id`, and Debian `popularity-contest` purging. Shell `HISTFILE` is unset (not Tails-style amnesia).
+* **Stream Isolation & Anti-Censorship:** Multi-SOCKS5 circuit isolation (9050, 9051, 9052). `obfs4` and `WebTunnel` via obfs4proxy/lyrebird; Snowflake only if `snowflake-client` is installed.
+
+> Interactive browsing must use **Tor Browser**. The transparent proxy does not hide canvas, WebGL, or font fingerprints of a stock browser.
 
 ## CLI Command Reference (`anonbox`)
 
 The `anonbox` toolkit provides a unified, idempotent CLI interface:
 
 ```bash
-# Full automated deployment (Setup -> Harden -> 12-Point Audit)
+# Full automated deployment (Setup -> Harden -> Audit)
 sudo ./anonbox all [--bridges-file FILE] [--verbose]
 
 # Setup Tor transparent proxy, nftables firewall, and DNS routing
@@ -111,16 +119,16 @@ sudo ./anonbox setup [--bridges-file FILE | --no-bridges] [--iface IFACE] [--ver
 # Apply comprehensive OS, Kernel (Yama, GRUB, sysctl), user & filesystem hardening
 sudo ./anonbox harden [--iface IFACE] [--dry-run] [--verbose]
 
-# Run the 12-section security, leak detection, and hardening audit suite
+# Run the leak-detection and hardening audit (includes kill-switch)
 sudo ./anonbox check
 
 # Show current Tor connection health, circuits, and public exit IP
 ./anonbox status
 
-# Rollback configuration to a previous snapshot
-sudo ./anonbox rollback
+# Rollback configuration to a chosen snapshot
+sudo ./anonbox rollback --snapshot 20260824_120000
 
-# Uninstall anonbox and restore standard clearnet networking
+# Uninstall anonbox (restore first snapshot + flush firewall)
 sudo ./anonbox uninstall
 ```
 
@@ -157,7 +165,7 @@ curl --socks5-hostname 127.0.0.1:9052 https://api-b.com
 
 ## Anti-Censorship Bridges (Pluggable Transports)
 
-If connecting from behind state-level DPI firewalls or censored networks, `anonbox` includes native support for pluggable transports (`obfs4`, `Snowflake`, and `WebTunnel`).
+If connecting from behind state-level DPI firewalls or censored networks, `anonbox` configures `obfs4` and `WebTunnel` via `obfs4proxy` or `lyrebird`. Snowflake is added only when `/usr/bin/snowflake-client` is present.
 
 ### 1. Acquiring Official Bridges
 
@@ -179,7 +187,7 @@ Bridge obfs4 198.51.100.25:9001 9B4F81A54E1803762804561234567890ABCDEF12 cert=ab
 ```
 
 > [!TIP]
-> Comments (`#`) and empty lines are ignored automatically. `anonbox` validates all bridge directives using `tor --verify-config` before applying them to `/etc/tor/torrc`.
+> Comments (`#`) and empty lines are ignored automatically. `anonbox` runs `tor --verify-config`, then starts Tor and **aborts** unless listeners are safe (no `0.0.0.0`; SOCKS/Control on localhost; TransPort/DNSPort on localhost + NIC IP) and bootstrap reaches 100%.
 
 ### 3. Deploying with Bridges
 

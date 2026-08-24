@@ -13,7 +13,7 @@ Instead, report security issues through one of the following channels:
 1. **GitHub Private Vulnerability Reporting:**
    Use the "Report a vulnerability" button under the **Security** tab of this repository.
 2. **Email Disclosure:**
-   Send an encrypted email (if preferred) or direct message to the maintainer:
+   Send a direct message to the maintainer (plain email is acceptable; no public PGP key is published for this project):
    - Maintainer: Alejandro Azario (`aleaz`)
    - Repository: [https://github.com/aleaz/anonbox](https://github.com/aleaz/anonbox)
 
@@ -36,7 +36,8 @@ To help us triage and resolve the issue quickly, please provide:
 
 ## Security Boundaries & Model
 
-`anonbox` is designed as a single-VM transparent proxy with OS-level hardening. Please review [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for established security boundaries:
+`anonbox` is a **single-VM fail-closed Tor workstation toolkit** for Debian (hardening candidate), not Tails or Whonix. Please review [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for established security boundaries:
 
-- **In-Scope:** Transparent TCP/DNS Tor routing, fail-closed kill-switch, DNS/UDP/ICMP/IPv6 leak prevention, OS hardening, stream isolation, anti-fingerprinting.
-- **Out-of-Scope (Known Limits):** Host machine compromise, physical cold-boot RAM attacks (unless running an amnesic system like Tails), browser fingerprint standardization (use Tor Browser with letterboxing for web browsing).
+- **In-Scope:** Transparent TCP/DNS Tor routing, fail-closed kill-switch, DNS/UDP/ICMP/IPv6 leak prevention, OS hardening, stream isolation.
+- **Residuals:** First `apt`/`git` install over clearnet; TransPort/DNSPort bind on NIC IP (mitigated by nft INPUT drop); MAC cloning under hypervisor NAT is not L2 anti-fingerprint.
+- **Out-of-Scope (Known Limits):** Host machine compromise, physical cold-boot RAM attacks, browser fingerprint standardization (use Tor Browser for web browsing), Whonix-style gateway isolation.

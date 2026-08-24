@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Transparent proxy uses nftables `redirect to :9040` / `:5353` with Tor `TransPort`/`DNSPort` on both `127.0.0.1` and the NIC primary IPv4 (never `0.0.0.0`). OUTPUT DNAT to `127.0.0.1` delivered zero packets to Tor on tested kernels.
+- OUTPUT uses `fib daddr type local accept` for post-redirect delivery (required on Debian 13; accept-by-`$IFACE_IP`:9040/5353 alone dropped redirected packets). INPUT explicitly drops new connections to those ports (NIC-bind residual mitigation).
+- Removed dual `TransPort`/`DNSPort` binds of `127.0.0.1` plus `0.0.0.0`. The overlap made Tor fail to bind; `tor --verify-config` never caught it because it does not open sockets.
+- Neutralized Debian `tor-service-defaults-torrc` via `/etc/tor/anonbox-defaults-torrc` + `tor@default` drop-in (no all-interfaces SocksPort / WorldWritable unix). Note: Tor rejects `SocksPort 0` combined with nonzero SocksPort.
+- Applied `/etc/apparmor.d/local/system_tor` (`owner /var/lib/tor/** rwk` including directory chmod) in **setup before Tor starts**, with `apparmor_parser -r` fail-hard.
+- Setup now aborts unless Tor is active, listeners are safe, nft `tor_*` tables are loaded, and bootstrap reaches 100% (`start_tor_or_die`).
+- `anonbox check` treats UDP/53 to external resolvers as intercepted-by-Tor (expected success), probes non-53 UDP for leaks, and no longer treats `nc -uz` as proof of UDP egress. Stream isolation no longer false-passes on failed curls.
+- Setup EXIT trap no longer returns 1 after success when temp paths were already removed.
+
+### Changed
+
+- Version **1.2.0** candidate. Status: hardening toolkit (not Tails/Whonix).
+- `torrc` is `chmod 640` `root:debian-tor`. Snowflake only if `snowflake-client` exists. Optional `torbrowser-launcher` when packaged.
+- nftables unit override: `After=systemd-modules-load.service sysinit.target` plus `Before=network-pre.target`.
+- MAC: NetworkManager `cloned-mac-address=random` only (macchanger oneshot removed). Documented as non-anti-FP under NAT.
+- Shell history: `unset HISTFILE` (not Tails amnesia). `hidepid` documented as ineffective vs sudo operators.
+- `LAN_SUBNET` display uses Python `ipaddress` when available.
+- Touched-files manifest at `/var/lib/anonbox/touched-files.manifest`.
+- Inbound RFC1918 SSH/ICMP closed by default; `--allow-ssh` for lab. `userns_clone` left enabled for Tor Browser sandbox.
+- CI: pinned Actions SHAs; smoke job (`scripts/ci-smoke.sh`); `scripts/acceptance-matrix.sh` for release gate.
+
+### Security
+
+- Transparent proxy does not replace Tor Browser; setup prints that warning.
+- Documented residuals: bootstrap clearnet apt/git, NIC TransPort binds, NAT MAC.
+
 ## [1.0.0] - 2026-08-23
 
 ### Added
