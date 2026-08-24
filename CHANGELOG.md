@@ -29,9 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refined technical documentation tone to meet strict security engineering standards.
 - Enforced `DEBIAN_FRONTEND=noninteractive` across all package manager operations for unattended/CI execution.
 - Allowed `--dry-run` preview execution without requiring root privileges.
+- Enhanced `anonbox status` to display active SOCKS isolation ports, local DNS interceptor, and hardware MAC address.
 
 ### Fixed
 
+- Fixed Tor daemon UID resolution by dynamically re-evaluating `TOR_UID` post-package installation in `cmd_setup`, preventing firewall drops on fresh Debian installs.
+- Hardened `cmd_uninstall` to completely stop custom services (`htpdate-tor`, `macchanger@`), unmask system daemons (`systemd-timesyncd`, `cups`, `bluetooth`), and restore standard clearnet DNS.
 - Fixed live kernel atomic ruleset reloading by invoking `nft -f` directly in addition to `systemctl restart nftables.service`.
 - Fixed arithmetic post-increment exit code under Bash `set -e` in logging and accounting routines.
 - Fixed DNS loopback capture precedence in `nftables` NAT output chain so `127.0.1.1` and `127.0.0.1:53` queries are redirected to Tor `DNSPort 5353` before loopback return.

@@ -256,6 +256,16 @@ cmd_setup()
     run env DEBIAN_FRONTEND=noninteractive apt-get update -q
     run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${pkgs[@]}"
     run env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q popularity-contest 2>/dev/null || true
+
+    # Re-evaluate Tor daemon user and UID dynamically post-package install
+    if id -u debian-tor >/dev/null 2>&1; then
+        TOR_USER="debian-tor"
+        TOR_UID="$(id -u debian-tor)"
+    elif id -u tor >/dev/null 2>&1; then
+        TOR_USER="tor"
+        TOR_UID="$(id -u tor)"
+    fi
+    vinfo "Tor Daemon UID verified: $TOR_USER ($TOR_UID)"
     ok "Required packages verified and popularity-contest purged"
 
     # 2. Configure /etc/tor/torrc
@@ -1188,6 +1198,7 @@ cmd_all()
 cmd_status()
 {
     step "anonbox Operational Status"
+    detect_network
     local is_active
     is_active="$(systemctl is-active tor@default 2>/dev/null || echo 'inactive')"
     local nft_active
@@ -1195,6 +1206,11 @@ cmd_status()
 
     info "Tor Service Status    : $is_active"
     info "nftables Firewall     : $nft_active"
+    info "Primary Network NIC   : $IFACE ($LAN_SUBNET)"
+
+    local current_mac
+    current_mac="$(cat "/sys/class/net/${IFACE}/address" 2>/dev/null || ip link show dev "$IFACE" 2>/dev/null | awk '/ether/ {print $2; exit}' || echo 'unknown')"
+    info "Active Hardware MAC   : $current_mac"
 
     if [[ "$is_active" == "active" ]]; then
         local tor_pid
@@ -1205,6 +1221,18 @@ cmd_status()
         current_ip="$(curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 https://check.torproject.org/api/ip 2>/dev/null | grep -o '"IP":"[^"]*' | cut -d'"' -f4 || echo 'Unavailable')"
         info "Active Tor Exit IP    : $current_ip"
         info "System Timezone       : $(timedatectl show --property=Timezone --value 2>/dev/null || echo 'unknown')"
+
+        # Stream Isolation Ports Status
+        local port_9050="Inactive" port_9051="Inactive" port_9052="Inactive" port_5353="Inactive"
+        if nc -z 127.0.0.1 9050 2>/dev/null; then port_9050="Listening (General / Browsing)"; fi
+        if nc -z 127.0.0.1 9051 2>/dev/null; then port_9051="Listening (Financial / Wallets)"; fi
+        if nc -z 127.0.0.1 9052 2>/dev/null; then port_9052="Listening (CLI / Automation)"; fi
+        if nc -z 127.0.0.1 5353 2>/dev/null || nc -u -z -w 1 127.0.0.1 5353 2>/dev/null; then port_5353="Listening (Tor DNSPort)"; fi
+
+        info "SOCKS5 Stream Ports   : 9050 ($port_9050)"
+        info "                      : 9051 ($port_9051)"
+        info "                      : 9052 ($port_9052)"
+        info "DNS Interception Port : 127.0.0.1:5353 ($port_5353)"
 
         local boot_log
         boot_log="$(journalctl -u tor@default.service -n 20 --no-pager 2>/dev/null | grep "Bootstrapped 100%" | tail -n 1 || echo '')"
@@ -1289,7 +1317,8 @@ cmd_uninstall()
 {
     require_root
     step "Uninstalling anonbox Configuration (Restoring standard networking)"
-    
+    detect_network
+
     # 1. Flush nftables
     if command -v nft >/dev/null 2>&1; then
         run nft flush ruleset 2>/dev/null || true
@@ -1297,24 +1326,43 @@ cmd_uninstall()
         ok "nftables firewall rules flushed and disabled"
     fi
 
-    # 2. Stop Tor
+    # 2. Stop and disable Tor
     run systemctl disable --now tor@default 2>/dev/null || true
     ok "Tor service stopped"
 
-    # 3. Restore NetworkManager DNS, MAC and Connectivity
+    # 3. Stop and remove anonbox custom systemd services
+    run systemctl disable --now htpdate-tor.service 2>/dev/null || true
+    run rm -f "$HTPDATE_SERVICE"
+
+    run systemctl disable --now "macchanger@${IFACE}.service" 2>/dev/null || true
+    run rm -f "$MAC_SERVICE"
+
+    # 4. Unmask system services
+    local noisy_services=(avahi-daemon cups cups-browsed bluetooth ModemManager systemd-timesyncd geoclue kerneloops whoopsie)
+    for svc in "${noisy_services[@]}"; do
+        run systemctl unmask "${svc}.service" 2>/dev/null || true
+    done
+    run systemctl enable --now systemd-timesyncd.service 2>/dev/null || true
+    ok "System services unmasked and systemd-timesyncd enabled"
+
+    # 5. Restore NetworkManager DNS, MAC, Connectivity and systemd-resolved
     run rm -f "$NM_DNS_CONF"
     run rm -f "$NM_MAC_CONF"
     run rm -f "$NM_CONN_CONF"
     run rm -f "$NFTABLES_OVERRIDE"
+    run rm -f "/etc/resolv.conf" 2>/dev/null || true
     run systemctl daemon-reload
     run systemctl restart NetworkManager 2>/dev/null || true
+    run systemctl enable --now systemd-resolved 2>/dev/null || true
+    ok "NetworkManager configuration restored and DNS reset"
 
-    # 4. Remove sysctl hardening if requested
+    # 6. Remove sysctl and OS hardening configurations
     run rm -f "$SYSCTL_FILE"
     run rm -f "$PROFILE_HISTORY"
     run rm -f "$SUDOERS_HARDENING"
     run rm -f "$LIMITS_COREDUMP"
     run rm -f "$MODPROBE_BLACKLIST"
+    run sysctl --system 2>/dev/null || true
 
     ok "anonbox uninstalled. Standard clearnet networking restored."
 }
