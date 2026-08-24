@@ -100,6 +100,14 @@ Rather than pooling all application traffic through a single Tor circuit, `anonb
 * **Port 9051 (SOCKS):** Dedicated for cryptocurrency wallets or financial apps with `IsolateDestAddr`.
 * **Port 9052 (SOCKS):** Maximum isolation with `IsolateDestAddr`, `IsolateDestPort`, and `IsolateClientAddr`.
 
+### 2.6. Anti-Censorship Pluggable Transports & Bridge Ingestion
+
+For operation in heavily filtered networks (such as state-level DPI firewalls), `anonbox` supports pluggable transports:
+
+* **Pluggable Transport Binaries:** `anonbox` automatically detects and configures `/usr/bin/obfs4proxy` or `/usr/bin/lyrebird` via `ClientTransportPlugin` directives for `obfs4`, `webtunnel`, and `snowflake`.
+* **Bridge Ingestion Pipeline:** When `--bridges-file <file>` is provided, the installer strips comments (`#`) and empty lines, injects `UseBridges 1` and all valid `Bridge <transport> ...` entries into `/etc/tor/torrc`.
+* **Automated Config Verification:** Before applying changes to the active Tor daemon, the configuration is dry-run tested via `tor --verify-config`. If invalid syntax is detected, the transaction rolls back without corrupting the running instance.
+
 ---
 
 ## 3. Kernel, Memory & System Hardening (KSPP & Tails Standards)

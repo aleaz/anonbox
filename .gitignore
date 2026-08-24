@@ -11,4 +11,6 @@
 
 # Local bridge files with private keys
 *bridges*.txt
+!bridges.txt.example
 !examples/*
+

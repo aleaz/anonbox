@@ -1,0 +1,33 @@
+# ==============================================================================
+# Anonbox - Tor Bridge Configuration File Example
+# ==============================================================================
+# Copy this file to 'bridges.txt' and populate it with your private Tor bridges:
+#   cp bridges.txt.example bridges.txt
+#
+# Then run anonbox with:
+#   sudo ./anonbox all --bridges-file bridges.txt
+#   (or: sudo ./anonbox setup --bridges-file bridges.txt)
+#
+# HOW TO ACQUIRE OFFICIAL BRIDGES:
+# 1. Web: https://bridges.torproject.org/options (select 'obfs4')
+# 2. Email: Send email to bridges@torproject.org from Gmail/Riseup with body: 'get transport obfs4'
+# 3. Telegram: Message @GetBridgesBot with '/bridges'
+# 4. Tor Browser: Settings > Tor > Bridges
+#
+# FORMAT GUIDELINES:
+# - Each active line MUST start with the 'Bridge' keyword.
+# - Lines starting with '#' and blank lines are ignored automatically.
+# - Anonbox automatically loads obfs4 / lyrebird pluggable transports.
+#
+# ------------------------------------------------------------------------------
+# Examples (replace with your actual bridge lines):
+# ------------------------------------------------------------------------------
+
+# Example 1: obfs4 bridge (recommended for bypassing DPI censorship)
+# Bridge obfs4 192.0.2.1:443 752FC927DA740424818FF29F47E1B0678F4638D7 cert=kHn8vQ+u6q49m9k/855iL0ZcK4hQzV6c7kF+2B280B23... iat-mode=0
+
+# Example 2: Vanilla bridge (direct TCP without pluggable transport)
+# Bridge 198.51.100.25:9001 9B4F81A54E1803762804561234567890ABCDEF12
+
+# Example 3: Snowflake transport
+# Bridge snowflake 192.0.2.3:1 2B280B23...

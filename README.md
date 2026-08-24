@@ -12,7 +12,7 @@
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg?style=flat-square)](LICENSE)
 
 <p align="center">
-  🛡️ <b>Fail-Closed nftables</b> &nbsp;•&nbsp; 🔒 <b>KSPP & Yama LSM</b> &nbsp;•&nbsp; 🚫 <b>Zero DNS/IPv6 Leaks</b> &nbsp;•&nbsp; 🔀 <b>Stream Isolation</b>
+  <b>Fail-Closed nftables</b> &nbsp;•&nbsp; <b>KSPP & Yama LSM</b> &nbsp;•&nbsp; <b>Zero DNS/IPv6 Leaks</b> &nbsp;•&nbsp; <b>Stream Isolation</b>
 </p>
 
 </div>
@@ -92,10 +92,10 @@ flowchart TD
 
 ## Core Security Pillars
 
-* 🌐 **100% Fail-Closed Transparent Routing:** All outbound TCP and DNS traffic is redirected to Tor (`TransPort 9040` / `DNSPort 5353`). If the Tor daemon terminates, the firewall blocks 100% of clearnet traffic. Non-Tor UDP, ICMP, and IPv6 packets are dropped at kernel level.
-* 🛡️ **Kernel & Memory Protection:** Memory zeroing on allocation/free (`init_on_alloc=1`, `init_on_free=1` in GRUB), Yama LSM ptrace restriction (`ptrace_scope=2`), TTY command injection mitigation (`legacy_tiocsti=0`), core dumps disabled, and secure `noexec,nosuid,nodev` mounts for `/tmp`, `/var/tmp`, and `/dev/shm`.
-* 🎭 **Anti-Fingerprinting & Telemetry Suppression:** Forced UTC timezone, MAC address randomization at boot (`macchanger` & NetworkManager), neutral hostname (`localhost`), standardized `/etc/machine-id` pool UUID, and Debian `popularity-contest` purging.
-* 🔀 **Stream Isolation & Anti-Censorship:** Multi-SOCKS5 circuit isolation (9050, 9051, 9052) preventing traffic correlation across applications, paired with native support for `obfs4`, `Snowflake`, and `WebTunnel` pluggable transports.
+* **100% Fail-Closed Transparent Routing:** All outbound TCP and DNS traffic is redirected to Tor (`TransPort 9040` / `DNSPort 5353`). If the Tor daemon terminates, the firewall blocks 100% of clearnet traffic. Non-Tor UDP, ICMP, and IPv6 packets are dropped at kernel level.
+* **Kernel & Memory Protection:** Memory zeroing on allocation/free (`init_on_alloc=1`, `init_on_free=1` in GRUB), Yama LSM ptrace restriction (`ptrace_scope=2`), TTY command injection mitigation (`legacy_tiocsti=0`), core dumps disabled, and secure `noexec,nosuid,nodev` mounts for `/tmp`, `/var/tmp`, and `/dev/shm`.
+* **Anti-Fingerprinting & Telemetry Suppression:** Forced UTC timezone, MAC address randomization at boot (`macchanger` & NetworkManager), neutral hostname (`localhost`), standardized `/etc/machine-id` pool UUID, and Debian `popularity-contest` purging.
+* **Stream Isolation & Anti-Censorship:** Multi-SOCKS5 circuit isolation (9050, 9051, 9052) preventing traffic correlation across applications, paired with native support for `obfs4`, `Snowflake`, and `WebTunnel` pluggable transports.
 
 ## CLI Command Reference (`anonbox`)
 
@@ -150,6 +150,45 @@ curl --socks5-hostname 127.0.0.1:9051 https://api-a.com
 
 # Query endpoint B via completely different circuit and exit IP
 curl --socks5-hostname 127.0.0.1:9052 https://api-b.com
+```
+
+## Anti-Censorship Bridges (Pluggable Transports)
+
+If connecting from behind state-level DPI firewalls or censored networks, `anonbox` includes native support for pluggable transports (`obfs4`, `Snowflake`, and `WebTunnel`).
+
+### 1. Acquiring Official Bridges
+
+Obtain private bridge lines from official Tor Project distribution channels:
+
+* **Web:** [https://bridges.torproject.org/options](https://bridges.torproject.org/options) (select `obfs4`)
+* **Email:** Send an email to `bridges@torproject.org` from a Gmail or Riseup account with body `get transport obfs4`
+* **Telegram:** Chat with [@GetBridgesBot](https://t.me/GetBridgesBot) and send `/bridges`
+* **Tor Browser:** Copy bridges from *Settings > Tor > Bridges*
+
+### 2. Bridge File Format
+
+Create a `bridges.txt` file (or copy from [`bridges.txt.example`](bridges.txt.example)). Each active line **must** start with the `Bridge` keyword:
+
+```text
+# Example obfs4 bridges (one per line)
+Bridge obfs4 192.0.2.1:443 752FC927DA740424818FF29F47E1B0678F4638D7 cert=kHn8vQ+u6q49m9k/855iL0ZcK4hQzV6c7kF+2B280B23... iat-mode=0
+Bridge obfs4 198.51.100.25:9001 9B4F81A54E1803762804561234567890ABCDEF12 cert=abc123xyz... iat-mode=0
+```
+
+> [!TIP]
+> Comments (`#`) and empty lines are ignored automatically. `anonbox` validates all bridge directives using `tor --verify-config` before applying them to `/etc/tor/torrc`.
+
+### 3. Deploying with Bridges
+
+```bash
+# 1. Copy the example template
+cp bridges.txt.example bridges.txt
+
+# 2. Paste your acquired bridges into bridges.txt
+nano bridges.txt
+
+# 3. Run anonbox with the bridge file
+sudo ./anonbox all --bridges-file bridges.txt
 ```
 
 ## Documentation
