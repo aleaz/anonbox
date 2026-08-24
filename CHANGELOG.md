@@ -35,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed AppArmor Tor containment crash by deploying `/etc/apparmor.d/local/system_tor` whitelist for pluggable transport binaries (`obfs4proxy`, `lyrebird`, `snowflake-client`) and operational logfiles.
+- Fixed Debian 13 (Trixie) package detection by adding `bind9-dnsutils` resolution, preventing false-positive APT updates under active fail-closed firewall.
 - Fixed Transparent TCP Proxying by configuring `TransPort` and `DNSPort` on `0.0.0.0` in addition to `127.0.0.1`, allowing redirected packets with outgoing interface IPs to be accepted and proxied through Tor.
 - Consolidated all package installations upfront in `cmd_setup` step 1 and added `dpkg -s` checks in `cmd_harden` steps 7 and 8 to prevent APT connection timeouts during hardening.
 - Fixed Tor bootstrap stall on re-runs by detecting daemon crashes in real time, inspecting multi-source logs, and pre-validating system UTC clock skew.
