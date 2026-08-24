@@ -15,19 +15,27 @@ pass "bash -n anonbox"
 # Torrc fragment must neutralize Debian defaults and forbid 0.0.0.0 binds
 grep -q 'anonbox-defaults-torrc' ./anonbox || fail "anonbox-defaults-torrc missing from generator"
 grep -q 'SocksPort 127.0.0.1:9050' ./anonbox || fail "localhost SocksPort missing"
-# Generator must not use SocksPort 0 (incompatible with nonzero SocksPort)
-if grep -E '^SocksPort 0$' ./anonbox >/dev/null 2>&1 || grep -qE 'printf.*SocksPort 0' ./anonbox; then
-  : # ignore comments
-fi
-if grep -E 'SocksPort 0$' ./anonbox | grep -v '^#' | grep -qv 'cannot'; then
-  # allow mentions in comments/docs inside script
-  if grep -E '^\s*SocksPort 0\s*$' ./anonbox >/dev/null 2>&1; then
-    fail "Generator still emits SocksPort 0"
-  fi
+grep -q 'User ${TOR_USER}' ./anonbox || fail "dynamic User \${TOR_USER} missing from anonbox-defaults"
+# Generator must not emit bare SocksPort 0 lines (incompatible with nonzero SocksPort)
+if grep -E '^\s*SocksPort 0\s*$' ./anonbox >/dev/null 2>&1; then
+  fail "Generator still emits SocksPort 0"
 fi
 pass "torrc generator asserts"
 
-# nftables template: redirect + INPUT drop + narrowed NIC accept
+# IFACE_IP drift helpers + check FAIL path
+grep -q 'torrc_transport_nic_ip' ./anonbox || fail "torrc_transport_nic_ip helper missing"
+grep -q 'warn_iface_ip_drift' ./anonbox || fail "warn_iface_ip_drift helper missing"
+grep -q 'IFACE_IP drift' ./anonbox || fail "IFACE_IP drift FAIL in check missing"
+grep -q 'Preserving existing Bridge lines' ./anonbox || fail "bridge preserve on re-setup missing"
+grep -q 'first/oldest snapshot' ./anonbox || fail "uninstall help must say first/oldest snapshot"
+grep -q 'rm -f "$ANONBOX_TOR_DEFAULTS"' ./anonbox || fail "uninstall must remove anonbox-defaults-torrc"
+# Dead ssh_output_extra must stay gone
+if grep -q 'ssh_output_extra' ./anonbox; then
+  fail "dead ssh_output_extra still present"
+fi
+pass "hygiene and drift asserts"
+
+# nftables template: redirect + INPUT drop + fib local accept
 grep -q 'redirect to :9040' ./anonbox || fail "nft redirect :9040 missing"
 grep -q 'redirect to :5353' ./anonbox || fail "nft redirect :5353 missing"
 grep -q 'tcp dport { 9040, 5353 } drop' ./anonbox || fail "INPUT drop 9040/5353 missing"

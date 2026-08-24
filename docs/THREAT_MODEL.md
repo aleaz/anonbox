@@ -4,7 +4,7 @@
 
 | Security Vector | Tails OS (Live USB) | Whonix (2 VMs: Gateway + WS) | anonbox (This Project) | Design Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **Storage Encryption** | LUKS (Persistent Volume) | Optional inside VM | **LUKS2 (Mandatory Pre-requisite)** | **IN-SCOPE (Mandatory)** |
+| **Storage Encryption** | LUKS (Persistent Volume) | Optional inside VM | **LUKS2 / eCryptfs (required for SAFE)** | **IN-SCOPE (check FAIL blocks SAFE)** |
 | **Tor Routing** | iptables/nftables | Hypervisor-isolated Gateway | **Local Fail-Closed nftables** | **IN-SCOPE (Mandatory)** |
 | **Kill-Switch on Crash** | Yes | Yes | **Yes (nftables drop policy)** | **IN-SCOPE (Mandatory)** |
 | **DNS / UDP Leak Drop** | Yes | Yes | **Yes (Kernel drop + local DNSPort)** | **IN-SCOPE (Mandatory)** |
@@ -29,7 +29,7 @@
 3. **Local Process Snooping:** Unprivileged non-sudo users cannot snoop on `/proc` PIDs (`hidepid=2,gid=sudo`), inject via `ptrace` (`ptrace_scope=2`), or read other users' files (`umask 027`, `/home/` 700). Operators in `sudo` still see all PIDs.
 4. **Time & Location Fingerprinting:** System clock is set to UTC and synchronized anonymously over Tor using `htpdate`, eliminating standard unencrypted NTP UDP leaks.
 5. **Machine-ID & Telemetry Correlation:** Standardized `/etc/machine-id`, purged `popularity-contest`, and disabled NetworkManager connectivity checks eliminate OS-level tracking tokens.
-6. **Disk Forensics when Powered Off:** LUKS2 AES-XTS 512-bit disk encryption ensures disk image files (`.qcow2`, `.vdi`) are unreadable without the passphrase.
+6. **Disk Forensics when Powered Off:** LUKS2 or eCryptfs keeps disk image files (`.qcow2`, `.vdi`) unreadable without the passphrase. Without encryption, `check` reports FAIL and SAFE is blocked (setup does not abort).
 
 ### Out-of-Scope (Known Limitations)
 
@@ -48,7 +48,7 @@
 
 ## 3. Acceptance Verification Matrix
 
-Every release of `anonbox` must satisfy 100% of the following verification checks:
+Release gate: prefer `sudo ./anonbox check`. **SAFE** means `FAIL_COUNT == 0`, Tor active, and encrypted storage (LUKS/eCryptfs). Individual matrix rows below are the in-scope verification targets; lab hosts may WARN or FAIL storage by design without blocking setup.
 
 | # | Verification Check | Command | Expected Result |
 | :--- | :--- | :--- | :--- |

@@ -339,14 +339,15 @@ assert_torrc_safe_binds()
 apply_anonbox_tor_defaults()
 {
     # Replace Debian defaults that open SocksPort 9050 / WorldWritable unix socks.
+    # Prefer anonbox-defaults-torrc over SocksPort 0 (Tor rejects 0 combined with nonzero SocksPort).
     run mkdir -p /etc/tor /etc/systemd/system/tor@default.service.d
     backup_file "$ANONBOX_TOR_DEFAULTS"
-    run tee "$ANONBOX_TOR_DEFAULTS" > /dev/null << 'EOF'
+    run tee "$ANONBOX_TOR_DEFAULTS" > /dev/null << EOF
 # anonbox safe defaults (replaces /usr/share/tor/tor-service-defaults-torrc listeners)
 DataDirectory /var/lib/tor
 PidFile /run/tor/tor.pid
 RunAsDaemon 1
-User debian-tor
+User ${TOR_USER}
 CookieAuthentication 1
 CookieAuthFile /run/tor/control.authcookie
 Log notice syslog
@@ -359,13 +360,51 @@ EOF
 [Service]
 ExecStartPre=
 ExecStart=
-ExecStartPre=/usr/bin/install -Z -m 02755 -o debian-tor -g debian-tor -d /run/tor
+ExecStartPre=/usr/bin/install -Z -m 02755 -o ${TOR_USER} -g ${TOR_USER} -d /run/tor
 ExecStartPre=/usr/bin/tor --defaults-torrc ${ANONBOX_TOR_DEFAULTS} -f /etc/tor/torrc --RunAsDaemon 0 --verify-config
 ExecStart=/usr/bin/tor --defaults-torrc ${ANONBOX_TOR_DEFAULTS} -f /etc/tor/torrc --RunAsDaemon 0
 EOF
     run chmod 644 "$TOR_UNIT_DROPIN"
     record_touched_file "$TOR_UNIT_DROPIN"
     run systemctl daemon-reload
+}
+
+# Non-loopback TransPort IPv4 from torrc (nft redirect target), or empty.
+torrc_transport_nic_ip()
+{
+    local f="${1:-$TORRC}"
+    [[ -f "$f" ]] || { printf '\n'; return 0; }
+    grep -E '^[[:space:]]*TransPort[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:9040' "$f" 2>/dev/null \
+        | grep -Ev '127\.0\.0\.1' \
+        | head -n 1 \
+        | sed -E 's/^[[:space:]]*TransPort[[:space:]]+([0-9.]+):9040.*/\1/' \
+        || true
+}
+
+# Live TransPort NIC bind from ss (excluding 127.0.0.1), or empty.
+ss_transport_nic_ip()
+{
+    local listen
+    listen="$(ss -lntH 'sport = :9040' 2>/dev/null || true)"
+    [[ -n "$listen" ]] || { printf '\n'; return 0; }
+    printf '%s\n' "$listen" \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:9040' \
+        | grep -Ev '^127\.0\.0\.1:' \
+        | head -n 1 \
+        | cut -d: -f1 \
+        || true
+}
+
+warn_iface_ip_drift()
+{
+    local configured live_bind
+    configured="$(torrc_transport_nic_ip)"
+    live_bind="$(ss_transport_nic_ip)"
+    if [[ -n "$configured" && -n "$IFACE_IP" && "$configured" != "$IFACE_IP" ]]; then
+        warn "Primary IPv4 (${IFACE_IP}) differs from torrc TransPort bind (${configured}). Re-run setup after IP/DHCP changes."
+    elif [[ -n "$live_bind" && -n "$IFACE_IP" && "$live_bind" != "$IFACE_IP" ]]; then
+        warn "Primary IPv4 (${IFACE_IP}) differs from live TransPort bind (${live_bind}). Re-run setup after IP/DHCP changes."
+    fi
 }
 
 effective_tor_defaults()
@@ -506,7 +545,7 @@ assert_tor_listeners()
         die "Tor SocksPort is bound on all interfaces (Debian default not neutralized)."
     fi
     if ss -xlpnH 2>/dev/null | grep -i tor | grep -qiE 'socks|WorldWritable'; then
-        # Soft check: unix socks from defaults should be gone after ControlSocket 0 / SocksPort 0
+        # Soft check: unix socks from Debian defaults should be gone after anonbox-defaults-torrc
         vinfo "Unix-domain Tor sockets still present; verify they are not WorldWritable"
     fi
 }
@@ -675,6 +714,11 @@ cmd_setup()
     fi
     write_touched_manifest_header
 
+    if [[ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}" ]] && (( ALLOW_SSH == 0 )); then
+        warn "SSH session detected but --allow-ssh was NOT set. After reboot, inbound SSH is blocked by default — you may lock yourself out. Re-run with --allow-ssh if remote admin is required."
+    fi
+    warn_iface_ip_drift
+
     # 1. Installing required packages and purging Debian telemetry
     step "1. Installing required packages and purging Debian telemetry"
     local dns_pkg="dnsutils"
@@ -758,7 +802,8 @@ cmd_setup()
 # Bind both localhost and ${IFACE_IP} — never 0.0.0.0 (conflicts with 127.0.0.1).
 # NIC binds are residual surface; INPUT drops new connections to these ports.
 # Debian defaults (SocksPort 9050 / WorldWritable unix) are replaced via
-# ${ANONBOX_TOR_DEFAULTS} + systemd drop-in (SocksPort 0 cannot coexist with nonzero ports).
+# ${ANONBOX_TOR_DEFAULTS} + systemd drop-in (--defaults-torrc). Do not use SocksPort 0
+# alongside nonzero SocksPort (Tor rejects that combination).
 VirtualAddrNetworkIPv4 10.192.0.0/10
 AutomapHostsOnResolve 1
 TransPort 127.0.0.1:9040 IsolateDestAddr IsolateDestPort
@@ -804,9 +849,21 @@ EOF
         printf '\n# --- Injected Bridges ---\nUseBridges 1\n' >> "$tmp_torrc"
         grep -vE '^\s*(#|$)' "$BRIDGES_FILE" >> "$tmp_torrc" || true
     elif (( NO_BRIDGES == 1 )); then
-        vinfo "Direct connection specified (--no-bridges)"
+        vinfo "Direct connection specified (--no-bridges); existing Bridge lines will not be preserved"
     else
-        info "No bridge file provided. Connecting directly (or configure in /etc/tor/torrc)"
+        # Re-setup without flags: keep Bridge lines already in torrc
+        if [[ -f "$TORRC" ]] && grep -E '^[[:space:]]*Bridge[[:space:]]' "$TORRC" >/dev/null 2>&1; then
+            info "Preserving existing Bridge lines from $TORRC (use --bridges-file to replace, or --no-bridges to drop)"
+            printf '\n# --- Preserved Bridges ---\n' >> "$tmp_torrc"
+            if grep -E '^[[:space:]]*UseBridges[[:space:]]' "$TORRC" >/dev/null 2>&1; then
+                grep -E '^[[:space:]]*UseBridges[[:space:]]' "$TORRC" >> "$tmp_torrc" || true
+            else
+                printf 'UseBridges 1\n' >> "$tmp_torrc"
+            fi
+            grep -E '^[[:space:]]*Bridge[[:space:]]' "$TORRC" >> "$tmp_torrc" || true
+        else
+            info "No bridge file provided and no existing Bridges in torrc. Connecting directly."
+        fi
     fi
 
     assert_torrc_safe_binds "$tmp_torrc"
@@ -845,7 +902,6 @@ EOF
     TMP_FILES+=("$tmp_nft")
 
     local ssh_input_rules=""
-    local ssh_output_extra=""
     if (( ALLOW_SSH == 1 )); then
         ssh_input_rules='        ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport 22 accept'
         info "Inbound SSH from RFC1918 enabled (--allow-ssh)"
@@ -914,7 +970,6 @@ ${ssh_input_rules}
         # ip daddr $IFACE_IP alone dropped post-redirect packets (0 hits on :9040).
         fib daddr type local accept
         tcp sport 22 ct state established,related accept
-${ssh_output_extra}
         skuid ${TOR_UID} accept
         udp sport 68 udp dport 67 accept
         ip protocol icmp drop
@@ -1020,6 +1075,7 @@ cmd_harden()
         show_system_summary
     fi
     write_touched_manifest_header
+    warn_iface_ip_drift
 
     # 1. Disable IPv6 in Kernel & Network Stack Hardening
     step "1. Applying extended kernel and network stack hardening"
@@ -1405,6 +1461,21 @@ cmd_check()
     else
         fail "tor@default.service is not active"
     fi
+    if [[ -f "$ANONBOX_TOR_DEFAULTS" ]]; then
+        pass "anonbox-defaults-torrc present ($ANONBOX_TOR_DEFAULTS)"
+    else
+        fail "$ANONBOX_TOR_DEFAULTS is missing (Debian insecure SocksPort/unix may apply). Re-run setup."
+    fi
+    local unit_exec
+    unit_exec="$(systemctl show -p ExecStart tor@default.service 2>/dev/null || true)"
+    if [[ -z "$unit_exec" ]]; then
+        unit_exec="$(systemctl cat tor@default.service 2>/dev/null || true)"
+    fi
+    if printf '%s\n' "$unit_exec" | grep -qE -- "--defaults-torrc[= ]${ANONBOX_TOR_DEFAULTS}|--defaults-torrc[= ]/etc/tor/anonbox-defaults-torrc"; then
+        pass "tor@default ExecStart uses --defaults-torrc ${ANONBOX_TOR_DEFAULTS}"
+    else
+        fail "tor@default ExecStart missing --defaults-torrc ${ANONBOX_TOR_DEFAULTS}. Re-run setup."
+    fi
     if [[ -f "$TORRC" ]]; then
         if grep -E '^[[:space:]]*(TransPort|DNSPort)[[:space:]]+(0\.0\.0\.0|\*)' "$TORRC" >/dev/null 2>&1; then
             fail "torrc still has 0.0.0.0 TransPort/DNSPort (bind conflict). Re-run setup."
@@ -1416,7 +1487,10 @@ cmd_check()
     fi
     detect_network
     if (( tor_active == 1 )); then
-        local port listen bind_ok=1
+        local port listen bind_ok=1 configured_tp live_tp
+        if [[ -z "$IFACE_IP" ]]; then
+            fail "No primary IPv4 on ${IFACE}; cannot verify TransPort/DNSPort NIC binds (re-run setup after network is up)"
+        fi
         for port in 9050 9051 9052 9053; do
             listen="$(ss -lntH "sport = :${port}" 2>/dev/null || true)"
             if [[ -z "$listen" ]]; then
@@ -1434,25 +1508,41 @@ cmd_check()
             pass "Socks/Control ports 9050-9053 are 127.0.0.1 only"
         fi
         listen="$(ss -lntH "sport = :9040" 2>/dev/null || true)"
-        if [[ -z "$listen" ]]; then
+        if [[ -z "$IFACE_IP" ]]; then
+            : # already failed above
+        elif [[ -z "$listen" ]]; then
             fail "TransPort TCP 9040 is not listening"
         elif printf '%s\n' "$listen" | grep -qE '0\.0\.0\.0:9040|\*:9040'; then
             fail "TransPort is bound on 0.0.0.0"
         elif ! printf '%s\n' "$listen" | grep -q '127.0.0.1:9040'; then
             fail "TransPort missing 127.0.0.1:9040"
-        elif [[ -n "$IFACE_IP" ]] && ! printf '%s\n' "$listen" | grep -q "${IFACE_IP}:9040"; then
+        elif ! printf '%s\n' "$listen" | grep -q "${IFACE_IP}:9040"; then
             fail "TransPort missing ${IFACE_IP}:9040 (nft redirect target)"
         else
             pass "TransPort listens on 127.0.0.1 and NIC IP (not 0.0.0.0)"
         fi
+        # IFACE_IP drift: live primary must match torrc and ss TransPort NIC bind
+        if [[ -n "$IFACE_IP" ]]; then
+            configured_tp="$(torrc_transport_nic_ip)"
+            live_tp="$(ss_transport_nic_ip)"
+            if [[ -n "$configured_tp" && "$configured_tp" != "$IFACE_IP" ]]; then
+                fail "IFACE_IP drift: live primary ${IFACE_IP} ≠ torrc TransPort ${configured_tp}. Re-run setup."
+            elif [[ -n "$live_tp" && "$live_tp" != "$IFACE_IP" ]]; then
+                fail "IFACE_IP drift: live primary ${IFACE_IP} ≠ ss TransPort bind ${live_tp}. Re-run setup."
+            elif [[ -n "$configured_tp" || -n "$live_tp" ]]; then
+                pass "TransPort NIC bind matches live primary IPv4 (${IFACE_IP})"
+            fi
+        fi
         listen="$(ss -lnuH "sport = :5353" 2>/dev/null || true)"
-        if [[ -z "$listen" ]]; then
+        if [[ -z "$IFACE_IP" ]]; then
+            : # already failed above
+        elif [[ -z "$listen" ]]; then
             fail "DNSPort UDP 5353 is not listening"
         elif printf '%s\n' "$listen" | grep -qE '0\.0\.0\.0:5353|\*:5353'; then
             fail "DNSPort is bound on 0.0.0.0"
         elif ! printf '%s\n' "$listen" | grep -q '127.0.0.1:5353'; then
             fail "DNSPort missing 127.0.0.1:5353"
-        elif [[ -n "$IFACE_IP" ]] && ! printf '%s\n' "$listen" | grep -q "${IFACE_IP}:5353"; then
+        elif ! printf '%s\n' "$listen" | grep -q "${IFACE_IP}:5353"; then
             fail "DNSPort missing ${IFACE_IP}:5353 (nft redirect target)"
         else
             pass "DNSPort listens on 127.0.0.1 and NIC IP (not 0.0.0.0)"
@@ -1844,6 +1934,7 @@ cmd_status()
         enc_status="Active (dm-crypt)"
     fi
     info "Storage Encryption    : $enc_status"
+    warn_iface_ip_drift
 }
 
 # =============================================================================
@@ -1963,6 +2054,9 @@ cmd_uninstall()
     run rm -f "$SUDOERS_HARDENING"
     run rm -f "$LIMITS_COREDUMP"
     run rm -f "$MODPROBE_BLACKLIST"
+    run rm -f "$ANONBOX_TOR_DEFAULTS"
+    run rm -f "$TOR_UNIT_DROPIN"
+    run rmdir /etc/systemd/system/tor@default.service.d 2>/dev/null || true
     run systemctl unmask systemd-resolved 2>/dev/null || true
     run systemctl daemon-reload
     run systemctl restart NetworkManager 2>/dev/null || true
@@ -1975,7 +2069,7 @@ cmd_uninstall()
         apparmor_parser -r "$aa_profile" 2>/dev/null || true
     fi
 
-    ok "anonbox uninstalled. Standard clearnet networking restored from snapshot (if present)."
+    ok "anonbox uninstalled. Standard clearnet networking restored from first snapshot (if present)."
 }
 
 # =============================================================================
@@ -1997,7 +2091,7 @@ Commands:
   all         Execute full pipeline: setup -> harden -> check
   status      Show current Tor connection health, circuits, and public exit IP
   rollback    Restore a snapshot from /var/backups/anonbox/ (--snapshot ID or interactive)
-  uninstall   Restore the latest snapshot, flush firewall, and restore clearnet
+  uninstall   Restore the first/oldest snapshot, flush firewall, and restore clearnet
   version     Display version information
   help        Show this help message
 

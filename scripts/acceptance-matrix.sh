@@ -13,7 +13,7 @@ usage: scripts/acceptance-matrix.sh [--help] [--list] [--run]
   --run    Execute sudo ./anonbox check (requires root on a configured host).
   --help   This message.
 
-Release gate: all in-scope checks must PASS; LUKS FAIL blocks SAFE by design.
+Release gate: prefer anonbox check; SAFE = FAIL_COUNT==0 + Tor + encrypted storage (LUKS FAIL blocks SAFE by design).
 EOF
 }
 

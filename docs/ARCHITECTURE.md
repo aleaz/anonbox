@@ -166,7 +166,11 @@ For operation in heavily filtered networks (such as state-level DPI firewalls), 
 
 ---
 
-## 5. Mandatory Pre-requisite: LUKS Full-Disk Encryption
+## 5. Storage Encryption (required for SAFE)
 
 > [!IMPORTANT]
-> Because `anonbox` is designed as a persistent virtual workstation rather than a RAM-only Live ISO (like Tails), **Full-Disk Encryption (LUKS2)** is mandatory during Debian installation. This ensures that when the VM is powered off, no unencrypted browsing history, private keys, or swap pages remain accessible on the host filesystem.
+> Because `anonbox` is a persistent virtual workstation rather than a RAM-only Live ISO (like Tails), **encrypted storage (LUKS2 full-disk or eCryptfs)** is required for `anonbox check` to report **SAFE** (`FAIL` if missing). Setup itself does **not** abort without encryption — lab VMs may lack LUKS — but at-rest disk images remain readable without a passphrase. Prefer LUKS2 during Debian install for production use.
+
+## 6. IFACE_IP / TransPort drift
+
+Tor `TransPort`/`DNSPort` bind the NIC primary IPv4 at setup time. If DHCP or hypervisor NAT changes that address, nft `redirect` targets a stale bind. `anonbox check` **FAIL**s when the live primary IPv4 ≠ the TransPort NIC bind in `torrc`/`ss`. `setup`/`harden`/`status` warn to re-run `setup` after IP changes (no NetworkManager dispatcher hook in this release).

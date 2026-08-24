@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `check` FAILs on IFACE_IP drift (live primary IPv4 ≠ TransPort NIC bind in torrc/`ss`) and when primary IPv4 is missing during transparent-path checks; `setup`/`harden`/`status` warn to re-run setup after IP change.
+- `check` asserts `/etc/tor/anonbox-defaults-torrc` exists and `tor@default` ExecStart uses `--defaults-torrc` pointing at it.
+- `uninstall` removes anonbox Tor defaults + `tor@default` drop-in (and empty drop-in dir) with `daemon-reload`; help text matches first/oldest snapshot restore (`backups[0]`).
+- Re-setup without `--bridges-file`/`--no-bridges` preserves existing `Bridge` lines from current torrc.
+- Strong WARN when SSH env is present but `--allow-ssh` is not set during setup (lockout on reboot).
+- Dynamic `User ${TOR_USER}` in anonbox-defaults; removed unused `ssh_output_extra`; clarified SocksPort comments for anonbox-defaults approach.
 - Transparent proxy uses nftables `redirect to :9040` / `:5353` with Tor `TransPort`/`DNSPort` on both `127.0.0.1` and the NIC primary IPv4 (never `0.0.0.0`). OUTPUT DNAT to `127.0.0.1` delivered zero packets to Tor on tested kernels.
 - OUTPUT uses `fib daddr type local accept` for post-redirect delivery (required on Debian 13; accept-by-`$IFACE_IP`:9040/5353 alone dropped redirected packets). INPUT explicitly drops new connections to those ports (NIC-bind residual mitigation).
 - Removed dual `TransPort`/`DNSPort` binds of `127.0.0.1` plus `0.0.0.0`. The overlap made Tor fail to bind; `tor --verify-config` never caught it because it does not open sockets.
@@ -21,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Version **1.2.0** candidate. Status: hardening toolkit (not Tails/Whonix).
+- Docs: LUKS/eCryptfs required for SAFE (`check` FAIL), not a setup hard die; acceptance matrix tied to SAFE = FAIL_COUNT==0 + Tor + encrypted.
 - `torrc` is `chmod 640` `root:debian-tor`. Snowflake only if `snowflake-client` exists. Optional `torbrowser-launcher` when packaged.
 - nftables unit override: `After=systemd-modules-load.service sysinit.target` plus `Before=network-pre.target`.
 - MAC: NetworkManager `cloned-mac-address=random` only (macchanger oneshot removed). Documented as non-anti-FP under NAT.
@@ -33,10 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Transparent proxy does not replace Tor Browser; setup prints that warning.
-- Documented residuals: bootstrap clearnet apt/git, NIC TransPort binds, NAT MAC.
+- Documented residuals: bootstrap clearnet apt/git, NIC TransPort binds, NAT MAC, IFACE_IP drift until re-setup.
 
 ## [1.0.0] - 2026-08-23
 
+> **Note:** Some 1.0.0 changelog claims are superseded by later work (keep for history). In particular: TransPort/`DNSPort` on `0.0.0.0` was reverted (bind conflict); `kernel.unprivileged_userns_clone=0` was undone for Tor Browser sandbox; AppArmor PT binary whitelist in `local/system_tor` was replaced (conflicts with Debian `x` modifiers); blanket RFC1918 SSH/ICMP accept is no longer default.
 ### Added
 
 - Unified standalone CLI entrypoint (`anonbox`) supporting `setup`, `harden`, `check`, `all`, `status`, `rollback`, and `uninstall`.
