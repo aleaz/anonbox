@@ -10,7 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Unified standalone CLI entrypoint (`anonbox`) supporting `setup`, `harden`, `check`, `all`, `status`, `rollback`, and `uninstall`.
-- Pluggable Transports support (`obfs4`, `Snowflake`, `WebTunnel`).
+- Pluggable Transports support (`obfs4`, `Snowflake`, `WebTunnel`) and bridge template file (`bridges.txt.example`).
+- Verbose CLI mode (`--verbose`, `-v`) for comprehensive command tracing, system discovery, and debugging.
+- Visual phase banners in `anonbox all` (`[FASE 1/3]`, `[FASE 2/3]`, `[FASE 3/3]`) to clearly separate deployment stages.
+- Real-time Tor bootstrap percentage parser (`25%`, `80%`, `100%`) replacing static point indicators.
+- Live in-memory `nftables` kernel table verification in audit suite (`cmd_check`).
+- Extended backup snapshots in `cmd_harden` (`/etc/fstab`, `/etc/default/grub`, `/etc/login.defs`, `/etc/pam.d/su`, `/etc/hosts`, `sysctl`) and full multi-file automated restoration in `cmd_rollback`.
 - Automated signal trapping (`trap cleanup EXIT INT TERM HUP`) for safe temporary file removal on terminal drops.
 - Pre-flight operating system detection and validation (`validate_os`) for Debian 12 and 13.
 - Storage encryption verification for `eCryptfs` and `LUKS`/dm-crypt partitions in `check`, `status`, `setup`, and `harden`.
@@ -23,9 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rebranded project from `debian-anon-vm` to `anonbox`.
 - Refined technical documentation tone to meet strict security engineering standards.
 - Enforced `DEBIAN_FRONTEND=noninteractive` across all package manager operations for unattended/CI execution.
+- Allowed `--dry-run` preview execution without requiring root privileges.
 
 ### Fixed
 
+- Fixed live kernel atomic ruleset reloading by invoking `nft -f` directly in addition to `systemctl restart nftables.service`.
+- Fixed arithmetic post-increment exit code under Bash `set -e` in logging and accounting routines.
 - Fixed DNS loopback capture precedence in `nftables` NAT output chain so `127.0.1.1` and `127.0.0.1:53` queries are redirected to Tor `DNSPort 5353` before loopback return.
 - Replaced static `sleep 20` in `htpdate-tor.service` with deterministic SOCKS port 9050 readiness polling.
 - Fixed audit counter isolation in `cmd_check()` to prevent cumulative counter pollution when running `anonbox all`.

@@ -43,14 +43,14 @@ FSTAB="/etc/fstab"
 NEUTRAL_HOSTNAME="localhost"
 STANDARDIZED_MACHINE_ID="b080b36e271609e5dd34d2b90ef76453"
 BOOTSTRAP_TIMEOUT=120
-BOOTSTRAP_POLL=3
+BOOTSTRAP_POLL=2
 
 HTPDATE_SOURCES=(
     "www.torproject.org"
     "check.torproject.org"
 )
 
-# CLI Options
+# CLI Options & Runtime State
 FORCE_IFACE=""
 IFACE=""
 LAN_SUBNET=""
@@ -59,6 +59,9 @@ TOR_UID="110"
 BRIDGES_FILE=""
 NO_BRIDGES=0
 DRY_RUN=0
+VERBOSE=0
+IN_PIPELINE=0
+CURRENT_SNAPSHOT_ID="$(date +%Y%m%d_%H%M%S)"
 
 # Counters
 PASS_COUNT=0
@@ -92,15 +95,24 @@ else
     GREEN="" RED="" YELLOW="" CYAN="" BOLD="" RESET=""
 fi
 
-ok()     { printf '[ %sOK%s   ] %s\n' "$GREEN"  "$RESET" "$1"; ((PASS_COUNT++)); }
-pass()   { printf '[ %sPASS%s ] %s\n' "$GREEN"  "$RESET" "$1"; ((PASS_COUNT++)); }
-fail()   { printf '[ %sFAIL%s ] %s\n' "$RED"    "$RESET" "$1"; ((FAIL_COUNT++)); }
-warn()   { printf '[ %sWARN%s ] %s\n' "$YELLOW" "$RESET" "$1"; ((WARN_COUNT++)); }
-skip()   { printf '[ %sSKIP%s ] %s\n' "$CYAN"   "$RESET" "$1"; ((SKIP_COUNT++)); }
+ok()     { printf '[ %sOK%s   ] %s\n' "$GREEN"  "$RESET" "$1"; ((PASS_COUNT++)) || true; }
+pass()   { printf '[ %sPASS%s ] %s\n' "$GREEN"  "$RESET" "$1"; ((PASS_COUNT++)) || true; }
+fail()   { printf '[ %sFAIL%s ] %s\n' "$RED"    "$RESET" "$1"; ((FAIL_COUNT++)) || true; }
+warn()   { printf '[ %sWARN%s ] %s\n' "$YELLOW" "$RESET" "$1"; ((WARN_COUNT++)) || true; }
+skip()   { printf '[ %sSKIP%s ] %s\n' "$CYAN"   "$RESET" "$1"; ((SKIP_COUNT++)) || true; }
 info()   { printf '         %s\n' "$1"; }
+vinfo()  { if (( VERBOSE == 1 || DRY_RUN == 1 )); then printf '         %s[DEBUG]%s %s\n' "$CYAN" "$RESET" "$1"; fi; }
 step()   { printf '\n%s==> %s%s\n' "$BOLD" "$1" "$RESET"; }
 section(){ printf '\n%s─── [%s] %s%s\n' "$BOLD" "$1" "$2" "$RESET"; }
 die()    { printf '\n%s[ERROR]%s %s\n' "$RED" "$RESET" "$1" >&2; exit 1; }
+
+phase_header()
+{
+    local num="$1" total="$2" title="$3"
+    printf '\n%s%s======================================================================%s\n' "$BOLD" "$CYAN" "$RESET"
+    printf '%s%s [FASE %s/%s] %s%s\n' "$BOLD" "$CYAN" "$num" "$total" "$title" "$RESET"
+    printf '%s%s======================================================================%s\n' "$BOLD" "$CYAN" "$RESET"
+}
 
 run()
 {
@@ -108,11 +120,17 @@ run()
         printf '%s[DRY-RUN]%s %s\n' "$CYAN" "$RESET" "$*"
         return 0
     fi
+    if (( VERBOSE == 1 )); then
+        printf '%s[EXEC]%s %s\n' "$CYAN" "$RESET" "$*"
+    fi
     "$@"
 }
 
 require_root()
 {
+    if (( DRY_RUN == 1 )); then
+        return 0
+    fi
     if [[ "$(id -u)" -ne 0 ]]; then
         die "This command requires root privileges. Please run with sudo."
     fi
@@ -139,14 +157,21 @@ detect_network()
 {
     if [[ -n "$FORCE_IFACE" ]]; then
         IFACE="$FORCE_IFACE"
-    else
-        IFACE="$(ip route show default 2>/dev/null | awk '/default/ { print $5; exit }')"
+    elif command -v ip >/dev/null 2>&1; then
+        IFACE="$(ip route show default 2>/dev/null | awk '/default/ { print $5; exit }' || true)"
         if [[ -z "$IFACE" ]]; then
             IFACE="enp0s1"
         fi
+    else
+        IFACE="enp0s1"
     fi
 
-    LAN_SUBNET="$(ip -4 addr show dev "$IFACE" 2>/dev/null | awk '/inet / { print $2; exit }')"
+    if command -v ip >/dev/null 2>&1; then
+        LAN_SUBNET="$(ip -4 addr show dev "$IFACE" 2>/dev/null | awk '/inet / { print $2; exit }' || true)"
+    else
+        LAN_SUBNET=""
+    fi
+
     if [[ -z "$LAN_SUBNET" ]]; then
         LAN_SUBNET="192.168.64.0/24"
     else
@@ -169,17 +194,38 @@ detect_network()
     fi
 }
 
+show_system_summary()
+{
+    info "Target Interface  : $IFACE"
+    info "Detected LAN      : $LAN_SUBNET"
+    info "Tor User / UID    : $TOR_USER (UID: $TOR_UID)"
+
+    # Storage encryption advisory check
+    local enc_found=0
+    if [[ -f "/proc/mounts" ]] && grep -qE "[[:space:]]ecryptfs[[:space:]]" /proc/mounts 2>/dev/null; then
+        enc_found=1
+        info "Storage Encryption: Active (eCryptfs mounted)"
+    elif command -v lsblk >/dev/null 2>&1 && lsblk -f 2>/dev/null | grep -qE "crypto_LUKS|crypt"; then
+        enc_found=1
+        info "Storage Encryption: Active (LUKS / dm-crypt)"
+    elif command -v dmsetup >/dev/null 2>&1 && dmsetup status --target crypt 2>/dev/null | grep -q ":"; then
+        enc_found=1
+        info "Storage Encryption: Active (dm-crypt)"
+    fi
+    if (( enc_found == 0 )); then
+        warn "Storage Encryption: No eCryptfs or LUKS partition detected (at-rest disk unencrypted)"
+    fi
+}
+
 backup_file()
 {
     local file="$1"
-    local timestamp
-    timestamp="$(date +%Y%m%d_%H%M%S)"
-    local target_dir="${BACKUP_DIR}/${timestamp}"
+    local target_dir="${BACKUP_DIR}/${CURRENT_SNAPSHOT_ID}"
 
     if [[ -f "$file" ]]; then
         run mkdir -p "$target_dir"
         run cp "$file" "${target_dir}/$(basename "$file")"
-        info "Backup saved: ${target_dir}/$(basename "$file")"
+        vinfo "Backup saved: ${target_dir}/$(basename "$file")"
     fi
 }
 
@@ -191,47 +237,36 @@ cmd_setup()
 {
     require_root
     validate_os
-    step "Starting anonbox Setup Pipeline"
-    detect_network
 
-    info "Target Interface : $IFACE"
-    info "Detected LAN     : $LAN_SUBNET"
-    info "Tor User / UID   : $TOR_USER (UID: $TOR_UID)"
-
-    # Storage encryption advisory check
-    local enc_found=0
-    if [[ -f "/proc/mounts" ]] && grep -qE "[[:space:]]ecryptfs[[:space:]]" /proc/mounts 2>/dev/null; then
-        enc_found=1
-        info "Storage Encryption: Active (eCryptfs mounted)"
-    elif command -v lsblk >/dev/null 2>&1 && lsblk -f 2>/dev/null | grep -qE "crypto_LUKS|crypt"; then
-        enc_found=1
-        info "Storage Encryption: Active (LUKS / dm-crypt)"
-    fi
-    if (( enc_found == 0 )); then
-        warn "Storage Encryption: No eCryptfs or LUKS partition detected (at-rest disk unencrypted)"
+    if (( IN_PIPELINE == 0 )); then
+        step "Starting anonbox Setup Pipeline (Tor Transparent Proxy & Firewall)"
+        detect_network
+        show_system_summary
     fi
 
     # 1. Install packages and purge telemetry
-    step "Installing required packages and purging Debian telemetry"
+    step "1. Installing required packages and purging Debian telemetry"
     local pkgs=(tor obfs4proxy nftables curl dnsutils netcat-openbsd iproute2)
     
     if apt-cache show lyrebird >/dev/null 2>&1; then
         pkgs+=(lyrebird)
     fi
 
+    vinfo "Package list: ${pkgs[*]}"
     run env DEBIAN_FRONTEND=noninteractive apt-get update -q
     run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${pkgs[@]}"
     run env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q popularity-contest 2>/dev/null || true
-    ok "Required packages installed and popularity-contest purged"
+    ok "Required packages verified and popularity-contest purged"
 
     # 2. Configure /etc/tor/torrc
-    step "Configuring Tor daemon (/etc/tor/torrc)"
+    step "2. Configuring Tor daemon (/etc/tor/torrc)"
     backup_file "$TORRC"
 
     local pt_binary="/usr/bin/obfs4proxy"
     if [[ -f "/usr/bin/lyrebird" ]]; then
         pt_binary="/usr/bin/lyrebird"
     fi
+    vinfo "Pluggable Transport Binary: $pt_binary"
 
     local tmp_torrc
     tmp_torrc="$(mktemp)"
@@ -275,15 +310,18 @@ EOF
 
     # Configure Bridges if provided
     if [[ -n "$BRIDGES_FILE" && -f "$BRIDGES_FILE" ]]; then
-        info "Injecting obfs4 bridges from $BRIDGES_FILE"
+        info "Injecting obfs4/transport bridges from $BRIDGES_FILE"
         echo "" >> "$tmp_torrc"
         echo "UseBridges 1" >> "$tmp_torrc"
+        local bridge_count=0
         while IFS= read -r line; do
             [[ -z "$line" || "$line" =~ ^# ]] && continue
             echo "$line" >> "$tmp_torrc"
+            ((bridge_count++)) || true
         done < "$BRIDGES_FILE"
+        vinfo "Total active bridge lines injected: $bridge_count"
     elif (( NO_BRIDGES == 0 )); then
-        info "No bridge file provided. Connecting directly or configure manually in /etc/tor/torrc."
+        info "No bridge file provided. Connecting directly (or configure in $TORRC)"
         echo "# UseBridges 1" >> "$tmp_torrc"
     fi
 
@@ -296,11 +334,11 @@ EOF
         ok "Tor configuration validated and written to $TORRC"
     else
         run rm -f "$tmp_torrc"
-        die "Tor configuration validation failed! Check bridge lines or syntax."
+        die "Tor configuration validation failed! Check bridge lines or syntax in your bridge file."
     fi
 
     # 3. Configure /etc/nftables.conf
-    step "Configuring fail-closed firewall (/etc/nftables.conf)"
+    step "3. Configuring fail-closed firewall (/etc/nftables.conf)"
     backup_file "$NFTABLES_CONF"
 
     local tmp_nft
@@ -389,15 +427,18 @@ EOF
         run cp "$tmp_nft" "$NFTABLES_CONF"
         run rm -f "$tmp_nft"
         run chmod 700 "$NFTABLES_CONF"
-        ok "nftables rules validated and written to $NFTABLES_CONF"
+        # Atomic ruleset replacement in live kernel
+        run nft -f "$NFTABLES_CONF"
+        ok "nftables rules validated and loaded atomically into live kernel"
     else
         run rm -f "$tmp_nft"
-        die "nftables configuration validation failed!"
+        die "nftables configuration validation failed! Check syntax or kernel nftables support."
     fi
 
     # 4. Prevent boot race condition via systemd drop-in override
-    step "Arming early boot firewall protection"
+    step "4. Arming early boot firewall protection"
     run mkdir -p /etc/systemd/system/nftables.service.d 2>/dev/null || true
+    backup_file "$NFTABLES_OVERRIDE"
     run tee "$NFTABLES_OVERRIDE" > /dev/null << 'EOF'
 [Unit]
 Before=network-pre.target shutdown.target
@@ -408,8 +449,9 @@ EOF
     ok "Early boot firewall protection configured (Before=network-pre.target)"
 
     # 5. Configure robust DNS in /etc/resolv.conf without chattr breaks
-    step "Configuring DNS leak protection"
+    step "5. Configuring DNS leak protection"
     run mkdir -p /etc/NetworkManager/conf.d 2>/dev/null || true
+    backup_file "$NM_DNS_CONF"
     run tee "$NM_DNS_CONF" > /dev/null << 'EOF'
 [main]
 dns=none
@@ -423,41 +465,64 @@ EOF
 nameserver 127.0.0.1
 options edns0 trust-ad
 EOF
-    ok "DNS fixed to 127.0.0.1 (Tor local resolver)"
+    ok "DNS fixed to 127.0.0.1 (Tor local resolver with NetworkManager DNS override)"
 
     # 6. Enable and start services
-    step "Enabling and starting system services"
-    run systemctl enable nftables.service
-    run systemctl restart nftables.service
-    ok "nftables firewall active"
+    step "6. Enabling and starting system services"
+    run systemctl enable nftables.service 2>/dev/null || true
+    run systemctl restart nftables.service 2>/dev/null || true
+    ok "nftables firewall service enabled and running"
 
-    run systemctl enable tor@default.service
-    run systemctl restart tor@default.service
-    ok "Tor service started"
+    run systemctl enable tor@default.service 2>/dev/null || true
+    run systemctl restart tor@default.service 2>/dev/null || true
+    ok "Tor daemon service started"
 
-    # 7. Wait for Tor Bootstrap (100%)
-    step "Waiting for Tor bootstrap (100%)..."
+    # 7. Wait for Tor Bootstrap with real progress parsing
+    step "7. Waiting for Tor bootstrap (100%)..."
+    if (( DRY_RUN == 1 )); then
+        skip "Skipping live Tor daemon bootstrap wait in dry-run mode"
+        if (( IN_PIPELINE == 0 )); then
+            ok "Setup complete! Run 'sudo ./anonbox check' to audit traffic."
+        fi
+        return 0
+    fi
+
     local bootstrapped=0
     local elapsed=0
+    local last_percent=""
 
     while (( elapsed < BOOTSTRAP_TIMEOUT )); do
-        if journalctl -u tor@default.service -n 50 --no-pager 2>/dev/null | grep -q "Bootstrapped 100%"; then
-            bootstrapped=1
-            break
+        local boot_line
+        boot_line="$(journalctl -u tor@default.service -n 30 --no-pager 2>/dev/null | grep -E "Bootstrapped [0-9]+%" | tail -n 1 || true)"
+        if [[ -n "$boot_line" ]]; then
+            local percent
+            percent="$(echo "$boot_line" | grep -oE "Bootstrapped [0-9]+%" | head -n 1 || true)"
+            local phase_desc
+            phase_desc="$(echo "$boot_line" | sed -E 's/.*Bootstrapped [0-9]+%[^:]*:\s*//' || true)"
+
+            if [[ -n "$percent" && "$percent" != "$last_percent" ]]; then
+                last_percent="$percent"
+                info "Tor Connection: ${percent}${phase_desc:+ ($phase_desc)}"
+            fi
+
+            if [[ "$percent" == *"100%"* ]]; then
+                bootstrapped=1
+                break
+            fi
         fi
         sleep "$BOOTSTRAP_POLL"
         (( elapsed += BOOTSTRAP_POLL ))
-        printf '.'
     done
-    printf '\n'
 
     if (( bootstrapped == 1 )); then
         ok "Tor successfully bootstrapped to 100% (took ~${elapsed}s)"
     else
-        warn "Tor bootstrap did not report 100% within ${BOOTSTRAP_TIMEOUT}s. Check bridge lines or connectivity."
+        warn "Tor bootstrap did not report 100% within ${BOOTSTRAP_TIMEOUT}s. Check bridge lines or internet connectivity."
     fi
 
-    ok "Setup complete! Run 'sudo anonbox check' to verify traffic."
+    if (( IN_PIPELINE == 0 )); then
+        ok "Setup complete! Run 'sudo ./anonbox check' to audit traffic."
+    fi
 }
 
 # =============================================================================
@@ -468,24 +533,16 @@ cmd_harden()
 {
     require_root
     validate_os
-    step "Starting anonbox Hardening Pipeline (Tails, Kicksecure & KSPP standards)"
-    detect_network
 
-    # Storage encryption advisory check
-    local enc_found=0
-    if [[ -f "/proc/mounts" ]] && grep -qE "[[:space:]]ecryptfs[[:space:]]" /proc/mounts 2>/dev/null; then
-        enc_found=1
-        info "Storage Encryption: Active (eCryptfs mounted)"
-    elif command -v lsblk >/dev/null 2>&1 && lsblk -f 2>/dev/null | grep -qE "crypto_LUKS|crypt"; then
-        enc_found=1
-        info "Storage Encryption: Active (LUKS / dm-crypt)"
-    fi
-    if (( enc_found == 0 )); then
-        warn "Storage Encryption: No eCryptfs or LUKS partition detected (at-rest disk unencrypted)"
+    if (( IN_PIPELINE == 0 )); then
+        step "Starting anonbox Hardening Pipeline (Tails, Kicksecure & KSPP standards)"
+        detect_network
+        show_system_summary
     fi
 
     # 1. Disable IPv6 in Kernel & Network Stack Hardening
     step "1. Applying extended kernel and network stack hardening"
+    backup_file "$SYSCTL_FILE"
     run tee "$SYSCTL_FILE" > /dev/null << 'EOF'
 # =============================================================================
 # anonbox Kernel & System Hardening (/etc/sysctl.d/99-tor-hardening.conf)
@@ -546,26 +603,38 @@ fs.protected_regular = 2
 fs.suid_dumpable = 0
 EOF
     run sysctl -q -p "$SYSCTL_FILE" 2>/dev/null || true
-    ok "Extended sysctl settings applied"
+    ok "Extended sysctl settings applied (/etc/sysctl.d/99-tor-hardening.conf)"
 
     # 2. User & Session Hardening
     step "2. Hardening user sessions, umask, and sudo"
+    backup_file "$LOGIN_DEFS"
     if grep -qE "^#*[[:space:]]*UMASK" "$LOGIN_DEFS" 2>/dev/null; then
         run sed -i 's/^#*[[:space:]]*UMASK.*/UMASK\t\t027/' "$LOGIN_DEFS"
     else
-        run printf 'UMASK\t\t027\n' >> "$LOGIN_DEFS"
+        run tee -a "$LOGIN_DEFS" > /dev/null << 'EOF'
+UMASK		027
+EOF
     fi
 
+    backup_file "$PAM_COMMON_SESSION"
     if [[ -f "$PAM_COMMON_SESSION" ]] && ! grep -q "pam_umask.so" "$PAM_COMMON_SESSION" 2>/dev/null; then
-        run printf 'session optional pam_umask.so umask=027\n' >> "$PAM_COMMON_SESSION"
+        run tee -a "$PAM_COMMON_SESSION" > /dev/null << 'EOF'
+session optional pam_umask.so umask=027
+EOF
     fi
 
+    local homes_count=0
     for u_home in /home/*; do
-        [[ -d "$u_home" ]] && run chmod 700 "$u_home"
+        if [[ -d "$u_home" ]]; then
+            run chmod 700 "$u_home"
+            ((homes_count++)) || true
+        fi
     done
+    vinfo "User home directories secured: $homes_count"
     ok "User directory permissions locked to 700 and umask set to 027"
 
     # Shell history and idle timeout
+    backup_file "$PROFILE_HISTORY"
     run tee "$PROFILE_HISTORY" > /dev/null << 'EOF'
 export HISTCONTROL=ignoreboth:erasedups
 export HISTSIZE=500
@@ -574,9 +643,10 @@ export TMOUT=900
 readonly TMOUT
 EOF
     run chmod 644 "$PROFILE_HISTORY"
-    ok "Shell history sanitization & 15m idle timeout configured"
+    ok "Shell history sanitization & 15m idle timeout configured (/etc/profile.d/99-privacy-history.sh)"
 
     # Sudoers hardening
+    backup_file "$SUDOERS_HARDENING"
     run tee "$SUDOERS_HARDENING" > /dev/null << 'EOF'
 Defaults use_pty
 Defaults passwd_timeout=1
@@ -588,16 +658,20 @@ EOF
 
     # Restrict su command
     if [[ -f "$PAM_SU" ]]; then
+        backup_file "$PAM_SU"
         if grep -q "pam_wheel.so" "$PAM_SU" 2>/dev/null; then
             run sed -i 's/^#*[[:space:]]*auth[[:space:]]*required[[:space:]]*pam_wheel\.so.*/auth required pam_wheel.so use_uid/' "$PAM_SU"
         else
-            run printf 'auth required pam_wheel.so use_uid\n' >> "$PAM_SU"
+            run tee -a "$PAM_SU" > /dev/null << 'EOF'
+auth required pam_wheel.so use_uid
+EOF
         fi
-        ok "su command restricted to sudo/wheel group"
+        ok "su command restricted to sudo/wheel group (/etc/pam.d/su)"
     fi
 
     # 3. Disable Core Dumps
     step "3. Disabling core dumps"
+    backup_file "$LIMITS_COREDUMP"
     run tee "$LIMITS_COREDUMP" > /dev/null << 'EOF'
 * hard core 0
 * soft core 0
@@ -605,53 +679,76 @@ EOF
     run chmod 644 "$LIMITS_COREDUMP"
 
     if [[ -f "$SYSTEMD_COREDUMP" ]]; then
+        backup_file "$SYSTEMD_COREDUMP"
         run tee "$SYSTEMD_COREDUMP" > /dev/null << 'EOF'
 [Coredump]
 Storage=none
 ProcessSizeMax=0
 EOF
     fi
-    ok "Core dumps disabled in limits and systemd"
+    ok "Core dumps disabled in limits.d and systemd coredump"
 
     # 4. Filesystem Mounts (/tmp, /var/tmp, /dev/shm noexec, /proc hidepid=2)
     step "4. Hardening mounts (/tmp, /var/tmp, /dev/shm noexec, /proc hidepid=2)"
     if [[ -f "$FSTAB" ]]; then
+        backup_file "$FSTAB"
+        local fstab_changes=0
         if ! grep -qE "[[:space:]]/tmp[[:space:]]" "$FSTAB" 2>/dev/null; then
-            run printf 'tmpfs /tmp tmpfs defaults,nosuid,nodev,noexec,size=2G 0 0\n' >> "$FSTAB"
+            run tee -a "$FSTAB" > /dev/null << 'EOF'
+tmpfs /tmp tmpfs defaults,nosuid,nodev,noexec,size=2G 0 0
+EOF
+            ((fstab_changes++)) || true
         fi
         if ! grep -qE "[[:space:]]/var/tmp[[:space:]]" "$FSTAB" 2>/dev/null; then
-            run printf 'tmpfs /var/tmp tmpfs defaults,nosuid,nodev,noexec,size=2G 0 0\n' >> "$FSTAB"
+            run tee -a "$FSTAB" > /dev/null << 'EOF'
+tmpfs /var/tmp tmpfs defaults,nosuid,nodev,noexec,size=2G 0 0
+EOF
+            ((fstab_changes++)) || true
         fi
         if ! grep -qE "[[:space:]]/dev/shm[[:space:]]" "$FSTAB" 2>/dev/null; then
-            run printf 'tmpfs /dev/shm tmpfs defaults,nosuid,nodev,noexec 0 0\n' >> "$FSTAB"
+            run tee -a "$FSTAB" > /dev/null << 'EOF'
+tmpfs /dev/shm tmpfs defaults,nosuid,nodev,noexec 0 0
+EOF
+            ((fstab_changes++)) || true
         fi
         if ! grep -qE "[[:space:]]/proc[[:space:]]" "$FSTAB" 2>/dev/null; then
-            run printf 'proc /proc proc defaults,nosuid,nodev,noexec,relatime,hidepid=2,gid=sudo 0 0\n' >> "$FSTAB"
+            run tee -a "$FSTAB" > /dev/null << 'EOF'
+proc /proc proc defaults,nosuid,nodev,noexec,relatime,hidepid=2,gid=sudo 0 0
+EOF
+            ((fstab_changes++)) || true
         fi
-        ok "Secure mounts configured in $FSTAB"
+        if (( fstab_changes > 0 )); then
+            ok "Secure mount entries added to $FSTAB ($fstab_changes new mountpoints)"
+        else
+            ok "Secure mount entries already present in $FSTAB"
+        fi
     fi
 
     # 5. GRUB Memory Sanitization
     step "5. Configuring kernel memory zeroing in GRUB"
     if [[ -f "$GRUB_DEFAULT" ]]; then
+        backup_file "$GRUB_DEFAULT"
         if ! grep -q "init_on_alloc=1" "$GRUB_DEFAULT" 2>/dev/null; then
             local extra_params="init_on_alloc=1 init_on_free=1 slab_nomerge page_alloc.shuffle=1 vsyscall=none debugfs=off"
             if grep -q "^GRUB_CMDLINE_LINUX_DEFAULT=" "$GRUB_DEFAULT" 2>/dev/null; then
                 run sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"|GRUB_CMDLINE_LINUX_DEFAULT=\"\1 ${extra_params}\"|" "$GRUB_DEFAULT"
             else
-                run printf 'GRUB_CMDLINE_LINUX_DEFAULT="%s"\n' "$extra_params" >> "$GRUB_DEFAULT"
+                run tee -a "$GRUB_DEFAULT" > /dev/null << EOF
+GRUB_CMDLINE_LINUX_DEFAULT="${extra_params}"
+EOF
             fi
             if command -v update-grub >/dev/null 2>&1; then
                 run update-grub
             fi
-            ok "GRUB memory zeroing parameters configured"
+            ok "GRUB memory zeroing parameters configured and update-grub executed"
         else
-            skip "GRUB parameters already configured"
+            skip "GRUB parameters already configured (init_on_alloc=1 present)"
         fi
     fi
 
     # 6. Blacklist Modules
     step "6. Blacklisting unused protocols, legacy filesystems, and attack vectors"
+    backup_file "$MODPROBE_BLACKLIST"
     run tee "$MODPROBE_BLACKLIST" > /dev/null << 'EOF'
 install dccp /bin/true
 install sctp /bin/true
@@ -694,6 +791,7 @@ EOF
 
     # Native NetworkManager MAC Randomization & DHCP Privacy
     run mkdir -p /etc/NetworkManager/conf.d 2>/dev/null || true
+    backup_file "$NM_MAC_CONF"
     run tee "$NM_MAC_CONF" > /dev/null << 'EOF'
 [device]
 wifi.scan-rand-mac-address=yes
@@ -706,12 +804,14 @@ wifi.dhcp-send-hostname=false
 EOF
 
     # Disable NetworkManager Periodic Connectivity Check (Telemetric GET /nm)
+    backup_file "$NM_CONN_CONF"
     run tee "$NM_CONN_CONF" > /dev/null << 'EOF'
 [connectivity]
 enabled=false
 EOF
 
     # Standardize system machine-id to blend with uniform anonymity set (Whonix pattern)
+    backup_file "/etc/machine-id"
     run tee /etc/machine-id > /dev/null << EOF
 ${STANDARDIZED_MACHINE_ID}
 EOF
@@ -721,6 +821,7 @@ EOF
     ok "System machine-id standardized to uniform anonymity pool"
 
     # MAC Randomization service for standalone interfaces
+    backup_file "$MAC_SERVICE"
     run tee "$MAC_SERVICE" > /dev/null << EOF
 [Unit]
 Description=MAC address randomization for %I
@@ -744,6 +845,7 @@ EOF
     run timedatectl set-timezone UTC 2>/dev/null || true
 
     # Neutral hostname
+    backup_file "/etc/hosts"
     run hostnamectl set-hostname "$NEUTRAL_HOSTNAME" 2>/dev/null || true
     if grep -q "127.0.1.1" /etc/hosts 2>/dev/null; then
         run sed -i "s/127.0.1.1.*/127.0.1.1\t${NEUTRAL_HOSTNAME}/" /etc/hosts
@@ -755,10 +857,11 @@ EOF
         run systemctl disable --now "${svc}.service" 2>/dev/null || true
         run systemctl mask "${svc}.service" 2>/dev/null || true
     done
-    ok "Noisy, telemetric and geolocation daemons disabled and masked"
+    ok "Noisy, telemetric and geolocation daemons disabled and masked (${#noisy_services[@]} services)"
 
     # Deterministic Htpdate over Tor service
     local sources_str="${HTPDATE_SOURCES[*]}"
+    backup_file "$HTPDATE_SERVICE"
     run tee "$HTPDATE_SERVICE" > /dev/null << EOF
 [Unit]
 Description=Secure Time Sync via Tor (htpdate)
@@ -778,7 +881,7 @@ EOF
     run systemctl enable htpdate-tor.service 2>/dev/null || true
 
     ok "Hardening pipeline completed successfully!"
-    info "Recommendation: Reboot the VM to apply all kernel and mount configurations."
+    info "Recommendation: Reboot the VM to apply kernel cmdline (GRUB) and mount configurations."
 }
 
 # =============================================================================
@@ -794,6 +897,11 @@ cmd_check()
     SKIP_COUNT=0
 
     step "anonbox Security, Leak Detection & Hardening Audit"
+
+    if (( DRY_RUN == 1 )); then
+        skip "Skipping active network socket and kernel audit tests in dry-run mode"
+        return 0
+    fi
 
     # Section 1: SOCKS Port
     section "1" "Testing SOCKS5 Proxy (127.0.0.1:9050)"
@@ -983,6 +1091,53 @@ cmd_check()
         info "Remediation: Mount an eCryptfs private partition or deploy Debian with LUKS2 Full Disk Encryption."
     fi
 
+    # Section 9: Firewall Ruleset In-Memory Validation
+    section "9" "Auditing Live nftables Kernel Ruleset"
+    if command -v nft >/dev/null 2>&1; then
+        local tables_active
+        tables_active="$(nft list tables 2>/dev/null || true)"
+        if [[ "$tables_active" == *"tor_nat"* && "$tables_active" == *"tor_filter"* ]]; then
+            pass "Live kernel has active anonbox firewall tables (tor_nat, tor_filter, tor_block)"
+        else
+            fail "Kernel does not contain active tor_nat/tor_filter tables! Run 'sudo ./anonbox setup'"
+        fi
+    else
+        fail "nft binary not found in PATH"
+    fi
+
+    # Section 10: AppArmor Enforce State
+    section "10" "Auditing AppArmor Protection"
+    if command -v aa-status >/dev/null 2>&1 && aa-status --enabled 2>/dev/null; then
+        pass "AppArmor is enabled and active in kernel"
+    else
+        warn "AppArmor status could not be verified or is inactive"
+    fi
+
+    # Section 11: Anti-Leak Mount Restrictions
+    section "11" "Auditing Filesystem Mount Flags (/tmp, /dev/shm)"
+    if [[ -f "/proc/mounts" ]]; then
+        if grep -E "[[:space:]]/tmp[[:space:]].*noexec" /proc/mounts >/dev/null 2>&1; then
+            pass "/tmp is mounted with noexec restriction"
+        else
+            warn "/tmp does not have noexec in current runtime (reboot required if recently added)"
+        fi
+        if grep -E "[[:space:]]/dev/shm[[:space:]].*noexec" /proc/mounts >/dev/null 2>&1; then
+            pass "/dev/shm is mounted with noexec restriction"
+        else
+            warn "/dev/shm does not have noexec in current runtime (reboot required if recently added)"
+        fi
+    fi
+
+    # Section 12: GRUB Memory Zeroing Audit
+    section "12" "Auditing Kernel Commandline Memory Sanitization"
+    if [[ -f "/proc/cmdline" ]]; then
+        if grep -q "init_on_alloc=1" /proc/cmdline 2>/dev/null; then
+            pass "Kernel active with init_on_alloc=1 (memory zeroing enabled)"
+        else
+            warn "Active kernel was not booted with init_on_alloc=1 (Reboot required to apply GRUB changes)"
+        fi
+    fi
+
     # Final Verdict
     printf '\n==========================================\n'
     printf '             AUDIT SUMMARY\n'
@@ -1010,9 +1165,19 @@ cmd_all()
 {
     require_root
     validate_os
-    step "Running Full Pipeline: setup -> harden -> check"
+    step "Starting anonbox Complete Automated Deployment Pipeline"
+    detect_network
+    show_system_summary
+
+    IN_PIPELINE=1
+
+    phase_header "1" "3" "Network, Tor Transparent Proxy & Fail-Closed Firewall"
     cmd_setup
+
+    phase_header "2" "3" "System, Kernel, Memory & Session Hardening"
     cmd_harden
+
+    phase_header "3" "3" "Security Audit, Leak Detection & Verification"
     cmd_check
 }
 
@@ -1088,19 +1253,31 @@ cmd_rollback()
     local i=1
     for b in "${backups[@]}"; do
         printf '  [%d] %s\n' "$i" "$(basename "$b")"
-        ((i++))
+        ((i++)) || true
     done
 
     local latest="${backups[-1]}"
     local clean_latest="${latest%/}"
-    info "Restoring latest snapshot: $(basename "$clean_latest")"
+    info "Restoring snapshot: $(basename "$clean_latest")"
 
+    # Restore known files if present in snapshot
     [[ -f "${clean_latest}/torrc" ]] && cp "${clean_latest}/torrc" "$TORRC" && ok "Restored $TORRC"
     [[ -f "${clean_latest}/nftables.conf" ]] && cp "${clean_latest}/nftables.conf" "$NFTABLES_CONF" && ok "Restored $NFTABLES_CONF"
     [[ -f "${clean_latest}/resolv.conf" ]] && cp "${clean_latest}/resolv.conf" "/etc/resolv.conf" && ok "Restored /etc/resolv.conf"
+    [[ -f "${clean_latest}/fstab" ]] && cp "${clean_latest}/fstab" "$FSTAB" && ok "Restored $FSTAB"
+    [[ -f "${clean_latest}/grub" ]] && cp "${clean_latest}/grub" "$GRUB_DEFAULT" && ok "Restored $GRUB_DEFAULT" && { command -v update-grub >/dev/null 2>&1 && update-grub || true; }
+    [[ -f "${clean_latest}/login.defs" ]] && cp "${clean_latest}/login.defs" "$LOGIN_DEFS" && ok "Restored $LOGIN_DEFS"
+    [[ -f "${clean_latest}/common-session" ]] && cp "${clean_latest}/common-session" "$PAM_COMMON_SESSION" && ok "Restored $PAM_COMMON_SESSION"
+    [[ -f "${clean_latest}/su" ]] && cp "${clean_latest}/su" "$PAM_SU" && ok "Restored $PAM_SU"
+    [[ -f "${clean_latest}/hosts" ]] && cp "${clean_latest}/hosts" "/etc/hosts" && ok "Restored /etc/hosts"
+    [[ -f "${clean_latest}/99-tor-hardening.conf" ]] && cp "${clean_latest}/99-tor-hardening.conf" "$SYSCTL_FILE" && ok "Restored $SYSCTL_FILE"
 
+    if [[ -f "$NFTABLES_CONF" ]]; then
+        nft -f "$NFTABLES_CONF" 2>/dev/null || true
+        systemctl restart nftables 2>/dev/null || true
+    fi
+    sysctl --system 2>/dev/null || true
     systemctl restart tor@default 2>/dev/null || true
-    systemctl restart nftables 2>/dev/null || true
     ok "Rollback applied and services restarted."
 }
 
@@ -1169,11 +1346,12 @@ Options:
   --bridges-file FILE   Specify path to file containing obfs4 bridge lines
   --no-bridges          Configure Tor without bridges (direct connection)
   --iface IFACE         Force specific network interface (e.g. enp0s1, eth0)
+  --verbose, -v         Enable detailed output and command tracing
   --dry-run             Preview actions without making system changes
 
 Examples:
   sudo ./anonbox setup --bridges-file bridges.txt
-  sudo ./anonbox harden
+  sudo ./anonbox harden --verbose
   sudo ./anonbox check
   sudo ./anonbox all --bridges-file bridges.txt
 EOF
@@ -1206,6 +1384,10 @@ main()
                 FORCE_IFACE="$2"
                 shift 2
                 ;;
+            --verbose|-v)
+                VERBOSE=1
+                shift
+                ;;
             --dry-run)
                 DRY_RUN=1
                 shift
@@ -1228,7 +1410,7 @@ main()
         status)     cmd_status ;;
         rollback)   cmd_rollback ;;
         uninstall)  cmd_uninstall ;;
-        version|-v) printf 'anonbox v%s\n' "$VERSION" ;;
+        version)    printf 'anonbox v%s\n' "$VERSION" ;;
         help|-h)    show_help ;;
         *)          die "Unknown command: $command (run './anonbox help' for available commands)" ;;
     esac

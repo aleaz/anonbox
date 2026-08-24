@@ -102,11 +102,14 @@ flowchart TD
 The `anonbox` toolkit provides a unified, idempotent CLI interface:
 
 ```bash
+# Full automated deployment (Setup -> Harden -> 12-Point Audit)
+sudo ./anonbox all [--bridges-file FILE] [--verbose]
+
 # Setup Tor transparent proxy, nftables firewall, and DNS routing
-sudo ./anonbox setup [--bridges-file FILE | --no-bridges] [--iface IFACE]
+sudo ./anonbox setup [--bridges-file FILE | --no-bridges] [--iface IFACE] [--verbose]
 
 # Apply comprehensive OS, Kernel (Yama, GRUB, sysctl), user & filesystem hardening
-sudo ./anonbox harden [--iface IFACE] [--dry-run]
+sudo ./anonbox harden [--iface IFACE] [--dry-run] [--verbose]
 
 # Run the 12-section security, leak detection, and hardening audit suite
 sudo ./anonbox check
