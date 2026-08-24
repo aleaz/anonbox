@@ -30,9 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enforced `DEBIAN_FRONTEND=noninteractive` across all package manager operations for unattended/CI execution.
 - Allowed `--dry-run` preview execution without requiring root privileges.
 - Enhanced `anonbox status` to display active SOCKS isolation ports, local DNS interceptor, and hardware MAC address.
+- Added smart package presence verification (`dpkg -s`) to skip redundant `apt-get` calls during re-runs under active fail-closed firewall.
+- Integrated dual-destination logging (`/var/log/tor/notices.log` and `syslog`) with automatic permissions setup.
 
 ### Fixed
 
+- Fixed Tor bootstrap stall on re-runs by detecting daemon crashes in real time, inspecting multi-source logs, and pre-validating system UTC clock skew.
 - Fixed Tor daemon UID resolution by dynamically re-evaluating `TOR_UID` post-package installation in `cmd_setup`, preventing firewall drops on fresh Debian installs.
 - Hardened `cmd_uninstall` to completely stop custom services (`htpdate-tor`, `macchanger@`), unmask system daemons (`systemd-timesyncd`, `cups`, `bluetooth`), and restore standard clearnet DNS.
 - Fixed live kernel atomic ruleset reloading by invoking `nft -f` directly in addition to `systemctl restart nftables.service`.

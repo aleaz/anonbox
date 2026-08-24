@@ -252,10 +252,25 @@ cmd_setup()
         pkgs+=(lyrebird)
     fi
 
-    vinfo "Package list: ${pkgs[*]}"
-    run env DEBIAN_FRONTEND=noninteractive apt-get update -q
-    run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${pkgs[@]}"
-    run env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q popularity-contest 2>/dev/null || true
+    # Check if packages are already installed to avoid unnecessary apt-get under fail-closed firewall
+    local missing_pkgs=()
+    for p in "${pkgs[@]}"; do
+        if ! dpkg -s "$p" >/dev/null 2>&1; then
+            missing_pkgs+=("$p")
+        fi
+    done
+
+    if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
+        vinfo "Missing packages to install: ${missing_pkgs[*]}"
+        run env DEBIAN_FRONTEND=noninteractive apt-get update -q
+        run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${missing_pkgs[@]}"
+    else
+        vinfo "All required packages are already installed (${pkgs[*]})"
+    fi
+
+    if dpkg -s popularity-contest >/dev/null 2>&1; then
+        run env DEBIAN_FRONTEND=noninteractive apt-get purge -y -q popularity-contest 2>/dev/null || true
+    fi
 
     # Re-evaluate Tor daemon user and UID dynamically post-package install
     if id -u debian-tor >/dev/null 2>&1; then
@@ -266,11 +281,16 @@ cmd_setup()
         TOR_UID="$(id -u tor)"
     fi
     vinfo "Tor Daemon UID verified: $TOR_USER ($TOR_UID)"
-    ok "Required packages verified and popularity-contest purged"
+    ok "Required packages verified and telemetry purged"
 
     # 2. Configure /etc/tor/torrc
     step "2. Configuring Tor daemon (/etc/tor/torrc)"
     backup_file "$TORRC"
+
+    # Ensure log directory exists with correct permissions
+    run mkdir -p /var/log/tor
+    run chown -R "${TOR_USER}:${TOR_USER}" /var/log/tor 2>/dev/null || true
+    run chmod 750 /var/log/tor 2>/dev/null || true
 
     local pt_binary="/usr/bin/obfs4proxy"
     if [[ -f "/usr/bin/lyrebird" ]]; then
@@ -310,6 +330,7 @@ DataDirectoryGroupReadable 1
 
 # --- Operational Logging ---
 Log notice syslog
+Log notice file /var/log/tor/notices.log
 DataDirectory /var/lib/tor
 
 # --- Anti-Censorship Pluggable Transports ---
@@ -487,7 +508,7 @@ EOF
     run systemctl restart tor@default.service 2>/dev/null || true
     ok "Tor daemon service started"
 
-    # 7. Wait for Tor Bootstrap with real progress parsing
+    # 7. Wait for Tor Bootstrap with multi-source log extraction & crash detection
     step "7. Waiting for Tor bootstrap (100%)..."
     if (( DRY_RUN == 1 )); then
         skip "Skipping live Tor daemon bootstrap wait in dry-run mode"
@@ -497,13 +518,39 @@ EOF
         return 0
     fi
 
+    # Pre-check system time (TLS handshake requirement)
+    local current_year
+    current_year="$(date -u +%Y 2>/dev/null || echo "2026")"
+    if (( current_year < 2024 )); then
+        warn "System clock appears desynchronized ($current_year). Tor TLS handshakes require accurate UTC time."
+    fi
+
     local bootstrapped=0
     local elapsed=0
     local last_percent=""
 
     while (( elapsed < BOOTSTRAP_TIMEOUT )); do
-        local boot_line
-        boot_line="$(journalctl -u tor@default.service -n 30 --no-pager 2>/dev/null | grep -E "Bootstrapped [0-9]+%" | tail -n 1 || true)"
+        # 1. Check if Tor daemon process is active or crashed
+        local tor_state
+        tor_state="$(systemctl is-active tor@default.service 2>/dev/null || systemctl is-active tor.service 2>/dev/null || echo 'unknown')"
+        if [[ "$tor_state" == "failed" || "$tor_state" == "inactive" ]]; then
+            warn "Tor service is in state '$tor_state'! Extracting failure logs..."
+            journalctl -u tor@default.service -u tor.service _COMM=tor -n 20 --no-pager 2>/dev/null || true
+            break
+        fi
+
+        # 2. Extract bootstrap line from multiple sources (notices.log, journalctl, /var/log/tor/log)
+        local boot_line=""
+        if [[ -f "/var/log/tor/notices.log" ]]; then
+            boot_line="$(grep -E "Bootstrapped [0-9]+%" /var/log/tor/notices.log 2>/dev/null | tail -n 1 || true)"
+        fi
+        if [[ -z "$boot_line" ]]; then
+            boot_line="$(journalctl -u tor@default.service -u tor.service _COMM=tor -n 30 --no-pager 2>/dev/null | grep -E "Bootstrapped [0-9]+%" | tail -n 1 || true)"
+        fi
+        if [[ -z "$boot_line" && -f "/var/log/tor/log" ]]; then
+            boot_line="$(grep -E "Bootstrapped [0-9]+%" /var/log/tor/log 2>/dev/null | tail -n 1 || true)"
+        fi
+
         if [[ -n "$boot_line" ]]; then
             local percent
             percent="$(echo "$boot_line" | grep -oE "Bootstrapped [0-9]+%" | head -n 1 || true)"
@@ -519,15 +566,22 @@ EOF
                 bootstrapped=1
                 break
             fi
+        else
+            if (( elapsed > 0 && elapsed % 10 == 0 )); then
+                vinfo "Waiting for initial Tor network response (${elapsed}s elapsed, service: $tor_state)..."
+            fi
         fi
+
         sleep "$BOOTSTRAP_POLL"
-        (( elapsed += BOOTSTRAP_POLL ))
+        (( elapsed += BOOTSTRAP_POLL )) || true
     done
 
     if (( bootstrapped == 1 )); then
         ok "Tor successfully bootstrapped to 100% (took ~${elapsed}s)"
     else
-        warn "Tor bootstrap did not report 100% within ${BOOTSTRAP_TIMEOUT}s. Check bridge lines or internet connectivity."
+        warn "Tor bootstrap did not report 100% within ${BOOTSTRAP_TIMEOUT}s."
+        info "Troubleshooting: Check internet connectivity, VM clock skew, or bridge lines."
+        info "Run 'sudo journalctl _COMM=tor -n 30' or 'sudo cat /var/log/tor/notices.log' for details."
     fi
 
     if (( IN_PIPELINE == 0 )); then
