@@ -81,9 +81,16 @@ NO_KILL_SWITCH=0
 QUIET=0
 JSON_OUT=0
 NO_COLOR_FLAG=0
+COLOR_MODE="auto"
 NO_LOG=0
 LOG_FILE=""
 SESSION_LOG=""
+SESSION_LOG_TEE=0
+GH_GROUP_OPEN=0
+PROGRESS_ON=0
+PROGRESS_PCT=-1
+PROGRESS_TITLE=""
+KV_ROWS=()
 CURRENT_SNAPSHOT_ID="$(date +%Y%m%d_%H%M%S)_$$"
 HELP_TOPIC=0
 
@@ -115,92 +122,176 @@ trap cleanup EXIT INT TERM HUP
 
 # =============================================================================
 # Output & Color Formatting
+# Humans: stderr (scannable progress + verdict). Scripts: stdout JSON + exit 0/1/2.
 # =============================================================================
+
+is_stdout_tty() { [[ -t 1 ]]; }
+is_stderr_tty() { [[ -t 2 ]]; }
+is_stdin_tty() { [[ -t 0 ]]; }
+
+use_color()
+{
+    (( NO_COLOR_FLAG == 1 )) && return 1
+    case "${COLOR_MODE}" in
+        never) return 1 ;;
+        always) return 0 ;;
+    esac
+    # NO_COLOR spec: any non-empty value disables color (unless --color=always).
+    [[ -n "${NO_COLOR:-}" ]] && return 1
+    [[ "${TERM:-}" == "dumb" ]] && return 1
+    case "${FORCE_COLOR:-}" in
+        ''|0|false|FALSE|no|NO) ;;
+        *) return 0 ;;
+    esac
+    is_stderr_tty
+}
 
 init_colors()
 {
-    if [[ -n "${NO_COLOR:-}" ]] || (( NO_COLOR_FLAG == 1 )) || [[ ! -t 1 ]]; then
-        GREEN="" RED="" YELLOW="" CYAN="" BOLD="" RESET=""
-    else
+    if use_color; then
         GREEN=$'\033[32m'
         RED=$'\033[31m'
         YELLOW=$'\033[33m'
         CYAN=$'\033[36m'
         BOLD=$'\033[1m'
         RESET=$'\033[0m'
+    else
+        GREEN="" RED="" YELLOW="" CYAN="" BOLD="" RESET=""
     fi
 }
 
 init_colors
 
-# Human output suppressed when quiet or JSON mode (counts still update).
+# Append to session log when not already capturing via tee.
 log_append()
 {
     [[ -n "${SESSION_LOG:-}" ]] || return 0
+    (( SESSION_LOG_TEE == 1 )) && return 0
     printf '%s\n' "$1" >> "$SESSION_LOG" 2>/dev/null || true
 }
 
-emit()
+# log [level] message — stderr. QUIET hides everything except error/fail/warn.
+log()
 {
-    if (( QUIET == 1 || JSON_OUT == 1 )); then
-        log_append "$1"
+    local level="info" msg
+    if [[ $# -ge 2 ]]; then
+        case "$1" in
+            error|fail|warn|pass|ok|skip|info|debug|step)
+                level="$1"
+                shift
+                ;;
+        esac
+    fi
+    msg="$*"
+
+    if (( JSON_OUT == 1 )); then
+        case "$level" in
+            error|fail|warn) ;;
+            *) log_append "$msg"; return 0 ;;
+        esac
+    fi
+
+    if (( QUIET == 1 )); then
+        case "$level" in
+            error|fail|warn) ;;
+            *) log_append "$msg"; return 0 ;;
+        esac
+    fi
+
+    if [[ "$level" == "pass" ]] && (( VERBOSE == 0 )); then
+        if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+            :
+        else
+            log_append "$msg"
+            return 0
+        fi
+    fi
+
+    if [[ "$level" == "debug" ]] && (( VERBOSE == 0 && DRY_RUN == 0 )); then
         return 0
     fi
-    printf '%s\n' "$1"
-    log_append "$1"
+
+    printf '%s\n' "$msg" >&2
+    log_append "$msg"
 }
 
-ok()
+log_ok()
 {
     ((PASS_COUNT++)) || true
-    emit "$(printf '[ %sOK%s   ] %s' "$GREEN" "$RESET" "$1")"
+    log ok "$(printf '[ %sOK%s   ] %s' "$GREEN" "$RESET" "$1")"
 }
-pass()
+log_pass()
 {
     ((PASS_COUNT++)) || true
-    emit "$(printf '[ %sPASS%s ] %s' "$GREEN" "$RESET" "$1")"
+    log pass "$(printf '[ %sPASS%s ] %s' "$GREEN" "$RESET" "$1")"
 }
-fail()
+log_fail()
 {
     ((FAIL_COUNT++)) || true
     FAILURE_MSGS+=("$1")
-    emit "$(printf '[ %sFAIL%s ] %s' "$RED" "$RESET" "$1")"
+    log fail "$(printf '[ %sFAIL%s ] %s' "$RED" "$RESET" "$1")"
 }
-warn()
+log_warn()
 {
     ((WARN_COUNT++)) || true
     WARNING_MSGS+=("$1")
-    emit "$(printf '[ %sWARN%s ] %s' "$YELLOW" "$RESET" "$1")"
+    log warn "$(printf '[ %sWARN%s ] %s' "$YELLOW" "$RESET" "$1")"
 }
-skip()
+log_skip()
 {
     ((SKIP_COUNT++)) || true
-    emit "$(printf '[ %sSKIP%s ] %s' "$CYAN" "$RESET" "$1")"
+    log skip "$(printf '[ %sSKIP%s ] %s' "$CYAN" "$RESET" "$1")"
 }
-info()
+log_info()
 {
-    emit "$(printf '         %s' "$1")"
+    log info "$(printf '         %s' "$1")"
 }
-vinfo()
+log_debug()
 {
-    if (( VERBOSE == 1 || DRY_RUN == 1 )); then
-        emit "$(printf '         %s[DEBUG]%s %s' "$CYAN" "$RESET" "$1")"
-    fi
+    log debug "$(printf '         %s[DEBUG]%s %s' "$CYAN" "$RESET" "$1")"
 }
+
+# Keep existing helper names as wrappers (used throughout the monolith).
+ok() { log_ok "$1"; }
+pass() { log_pass "$1"; }
+fail() { log_fail "$1"; }
+warn() { log_warn "$1"; }
+skip() { log_skip "$1"; }
+info() { log_info "$1"; }
+vinfo() { log_debug "$1"; }
+emit() { log info "$1"; }
+
 step()
 {
-    if (( QUIET == 1 || JSON_OUT == 1 )); then
-        return 0
-    fi
-    printf '\n%s==> %s%s\n' "$BOLD" "$1" "$RESET"
+    log step "$(printf '\n%s==> %s%s' "$BOLD" "$1" "$RESET")"
 }
+
+gh_group_start()
+{
+    local title="$1"
+    [[ "${GITHUB_ACTIONS:-}" == "true" ]] || return 0
+    (( GH_GROUP_OPEN == 1 )) && printf '::endgroup::\n' >&2
+    printf '::group::%s\n' "$title" >&2
+    GH_GROUP_OPEN=1
+}
+
+gh_group_end()
+{
+    [[ "${GITHUB_ACTIONS:-}" == "true" ]] || return 0
+    (( GH_GROUP_OPEN == 1 )) || return 0
+    printf '::endgroup::\n' >&2
+    GH_GROUP_OPEN=0
+}
+
 section()
 {
-    if (( QUIET == 1 || JSON_OUT == 1 )); then
-        return 0
+    local num="$1" title="$2"
+    if [[ "${GITHUB_ACTIONS:-}" == "true" && "$IN_PIPELINE" -eq 0 ]]; then
+        gh_group_start "[${num}] ${title}"
     fi
-    printf '\n%s─── [%s] %s%s\n' "$BOLD" "$1" "$2" "$RESET"
+    log step "$(printf '\n%s==> [%s] %s%s' "$BOLD" "$num" "$title" "$RESET")"
 }
+
 die()
 {
     local msg
@@ -253,24 +344,117 @@ reset_audit_counters()
 phase_header()
 {
     local num="$1" total="$2" title="$3"
-    if (( QUIET == 1 || JSON_OUT == 1 )); then
+    gh_group_start "[PHASE ${num}/${total}] ${title}"
+    log step "$(printf '\n%s==> [PHASE %s/%s] %s%s' "$BOLD" "$num" "$total" "$title" "$RESET")"
+}
+
+# progress_hide: 0 = hide bar (QUIET / JSON). Non-TTY still prints a line per %.
+progress_hide()
+{
+    (( QUIET == 1 || JSON_OUT == 1 )) && return 0
+    return 1
+}
+
+progress_use_cr()
+{
+    progress_hide && return 1
+    [[ "${GITHUB_ACTIONS:-}" == "true" ]] && return 1
+    is_stderr_tty
+}
+
+progress_start()
+{
+    PROGRESS_TITLE="$1"
+    PROGRESS_PCT=-1
+    PROGRESS_ON=1
+    progress_hide && return 0
+    if progress_use_cr; then
+        printf '%s' "$PROGRESS_TITLE" >&2
+    else
+        log_info "$PROGRESS_TITLE"
+    fi
+}
+
+progress_update()
+{
+    local pct="${1:-0}" desc="${2:-}"
+    local filled=0 i bar
+    (( PROGRESS_ON == 1 )) || return 0
+    progress_hide && return 0
+    [[ "$pct" == "$PROGRESS_PCT" ]] && return 0
+    PROGRESS_PCT="$pct"
+    if progress_use_cr; then
+        [[ "$pct" =~ ^[0-9]+$ ]] || pct=0
+        filled=$(( pct * 20 / 100 ))
+        (( filled > 20 )) && filled=20
+        (( filled < 0 )) && filled=0
+        bar=""
+        for ((i = 0; i < filled; i++)); do bar+="#"; done
+        for ((i = filled; i < 20; i++)); do bar+="-"; done
+        printf '\r%s [%s] %3d%% %s\033[K' "$PROGRESS_TITLE" "$bar" "$pct" "$desc" >&2
+    else
+        log_info "${PROGRESS_TITLE}: ${pct}%${desc:+ (${desc})}"
+    fi
+}
+
+progress_done()
+{
+    (( PROGRESS_ON == 1 )) || return 0
+    PROGRESS_ON=0
+    progress_hide && return 0
+    if progress_use_cr; then
+        printf '\n' >&2
+    fi
+}
+
+kv_row()
+{
+    KV_ROWS+=("$1"$'\t'"$2")
+}
+
+print_table()
+{
+    local row key val
+    if (( JSON_OUT == 1 )); then
+        KV_ROWS=()
         return 0
     fi
-    printf '\n%s%s======================================================================%s\n' "$BOLD" "$CYAN" "$RESET"
-    printf '%s%s [PHASE %s/%s] %s%s\n' "$BOLD" "$CYAN" "$num" "$total" "$title" "$RESET"
-    printf '%s%s======================================================================%s\n' "$BOLD" "$CYAN" "$RESET"
+    for row in "${KV_ROWS[@]+"${KV_ROWS[@]}"}"; do
+        key="${row%%$'\t'*}"
+        val="${row#*$'\t'}"
+        printf '%-22s %s\n' "$key" "$val" >&2
+        log_append "$(printf '%-22s %s' "$key" "$val")"
+    done
+    KV_ROWS=()
+}
+
+print_result_card()
+{
+    local name="$1"
+    local status="$2"
+    shift 2
+    local i=1 line
+    if (( JSON_OUT == 1 )); then
+        return 0
+    fi
+    gh_group_end
+    printf '\n%s==> %s %s%s\n' "$BOLD" "$name" "$status" "$RESET" >&2
+    kv_row "Status" "$status"
+    for line in "$@"; do
+        kv_row "Next ${i}" "$line"
+        ((i++)) || true
+    done
+    print_table
 }
 
 run()
 {
     if (( DRY_RUN == 1 )); then
-        if (( QUIET == 0 && JSON_OUT == 0 )); then
-            printf '%s[DRY-RUN]%s %s\n' "$CYAN" "$RESET" "$*"
-        fi
+        log debug "$(printf '%s[DRY-RUN]%s %s' "$CYAN" "$RESET" "$*")"
         return 0
     fi
-    if (( VERBOSE == 1 && QUIET == 0 && JSON_OUT == 0 )); then
-        printf '%s[EXEC]%s %s\n' "$CYAN" "$RESET" "$*"
+    if (( VERBOSE == 1 )); then
+        log debug "$(printf '%s[EXEC]%s %s' "$CYAN" "$RESET" "$*")"
     fi
     "$@"
 }
@@ -489,7 +673,7 @@ confirm_or_die()
         die "${prompt} Non-interactive mode requires --yes."
     fi
     local ans
-    printf '%s [%s]: ' "$prompt" "$expected"
+    printf '%s [%s]: ' "$prompt" "$expected" >&2
     read -r ans
     if [[ "$ans" != "$expected" ]]; then
         die "Aborted (expected confirmation: $expected)."
@@ -506,7 +690,7 @@ prompt_continue_or_die()
         die "${prompt} Re-run with --yes to continue non-interactively."
     fi
     local ans
-    printf '%s [y/N]: ' "$prompt"
+    printf '%s [y/N]: ' "$prompt" >&2
     read -r ans
     case "$ans" in
         y|Y|yes|YES) return 0 ;;
@@ -612,39 +796,55 @@ print_audit_summary()
         return "$LAST_EXIT_CODE"
     fi
 
-    # Quiet mode still prints the summary block.
-    printf '\n==========================================\n'
-    printf '             AUDIT SUMMARY\n'
-    printf '==========================================\n'
-    printf 'PASS : %d\n' "$PASS_COUNT"
-    printf 'WARN : %d\n' "$WARN_COUNT"
-    printf 'FAIL : %d\n' "$FAIL_COUNT"
-    printf 'SKIP : %d\n' "$SKIP_COUNT"
-    printf '\n'
+    gh_group_end
 
+    # Result card always prints (including --quiet): counts, FAIL/WARN lists, verdict.
+    printf '\n%s==> AUDIT SUMMARY%s\n' "$BOLD" "$RESET" >&2
+    kv_row "PASS" "$PASS_COUNT"
+    kv_row "WARN" "$WARN_COUNT"
+    kv_row "FAIL" "$FAIL_COUNT"
+    kv_row "SKIP" "$SKIP_COUNT"
+    print_table
+
+    if [[ ${#FAILURE_MSGS[@]} -gt 0 ]]; then
+        printf '\nFailures:\n' >&2
+        local fm
+        for fm in "${FAILURE_MSGS[@]}"; do
+            printf '  - %s\n' "$fm" >&2
+        done
+    fi
+    if [[ ${#WARNING_MSGS[@]} -gt 0 ]]; then
+        printf '\nWarnings:\n' >&2
+        local wm
+        for wm in "${WARNING_MSGS[@]}"; do
+            printf '  - %s\n' "$wm" >&2
+        done
+    fi
+
+    printf '\n' >&2
     if [[ "$VERDICT" == "SAFE" ]]; then
-        printf '%s%sSAFE: Traffic is transparently routed through Tor with active hardening.%s\n' "$BOLD" "$GREEN" "$RESET"
+        printf '%s%sSAFE: Traffic is transparently routed through Tor with active hardening.%s\n' "$BOLD" "$GREEN" "$RESET" >&2
     else
         local reason_str=""
         local save_ifs="$IFS"
         IFS='; '
         reason_str="${reasons[*]}"
         IFS="$save_ifs"
-        printf '%s%sUNSAFE: %s.%s\n' "$BOLD" "$RED" "$reason_str" "$RESET"
+        printf '%s%sUNSAFE: %s.%s\n' "$BOLD" "$RED" "$reason_str" "$RESET" >&2
     fi
 
     if [[ ${#REMEDIATIONS[@]} -gt 0 ]]; then
-        printf '\nNext steps:\n'
+        printf '\nNext steps:\n' >&2
         local i=1 item id hint
         for item in "${REMEDIATIONS[@]}"; do
             id="${item%%|*}"
             hint="${item#*|}"
-            printf '  %d. [%s] %s\n' "$i" "$id" "$hint"
+            printf '  %d. [%s] %s\n' "$i" "$id" "$hint" >&2
             ((i++)) || true
         done
     fi
-    printf '\n'
-    printf 'Exit code: %d (0=SAFE, 1=leak/network, 2=hardening/storage)\n\n' "$LAST_EXIT_CODE"
+    printf '\n' >&2
+    printf 'Exit code: %d (0=SAFE, 1=leak/network, 2=hardening/storage)\n\n' "$LAST_EXIT_CODE" >&2
     return "$LAST_EXIT_CODE"
 }
 
@@ -721,10 +921,20 @@ start_session_log()
     SESSION_LOG="$(resolve_session_log_path "${LOG_FILE}")"
     : >> "$SESSION_LOG" || { umask "$prev_umask"; SESSION_LOG=""; return 0; }
     umask "$prev_umask"
-    if (( QUIET == 0 && JSON_OUT == 0 )); then
-        printf '         Session log: %s\n' "$SESSION_LOG"
+    printf '=== anonbox v%s session start %s ===\n' "$VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$SESSION_LOG"
+
+    # Separate tees: never 2>&1. --json keeps stdout pure (one JSON object).
+    if (( JSON_OUT == 1 )); then
+        # shellcheck disable=SC2094
+        exec 2> >(tee -a "$SESSION_LOG" >&2)
+    else
+        # shellcheck disable=SC2094
+        exec > >(tee -a "$SESSION_LOG")
+        # shellcheck disable=SC2094
+        exec 2> >(tee -a "$SESSION_LOG" >&2)
     fi
-    log_append "=== anonbox v${VERSION} session start $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+    SESSION_LOG_TEE=1
+    log_info "Session log: $SESSION_LOG"
 }
 
 # =============================================================================
@@ -783,23 +993,23 @@ detect_network()
 
 show_system_summary()
 {
-    info "Target Interface  : $IFACE"
-    info "Interface IPv4    : ${IFACE_IP:-unknown}"
-    info "Detected LAN      : $LAN_SUBNET"
-    info "Tor User / UID    : $TOR_USER (UID: $TOR_UID)"
+    kv_row "Interface" "$IFACE"
+    kv_row "IPv4" "${IFACE_IP:-unknown}"
+    kv_row "LAN" "$LAN_SUBNET"
+    kv_row "Tor user" "$TOR_USER (UID: $TOR_UID)"
 
-    # Storage encryption advisory check
     local enc_found=0
     if [[ -f "/proc/mounts" ]] && grep -qE "[[:space:]]ecryptfs[[:space:]]" /proc/mounts 2>/dev/null; then
         enc_found=1
-        info "Storage Encryption: Active (eCryptfs mounted)"
+        kv_row "Storage" "Active (eCryptfs mounted)"
     elif command -v lsblk >/dev/null 2>&1 && lsblk -f 2>/dev/null | grep -qE "crypto_LUKS|crypt"; then
         enc_found=1
-        info "Storage Encryption: Active (LUKS / dm-crypt)"
+        kv_row "Storage" "Active (LUKS / dm-crypt)"
     elif command -v dmsetup >/dev/null 2>&1 && dmsetup status --target crypt 2>/dev/null | grep -q ":"; then
         enc_found=1
-        info "Storage Encryption: Active (dm-crypt)"
+        kv_row "Storage" "Active (dm-crypt)"
     fi
+    print_table
     if (( enc_found == 0 )); then
         warn "Storage Encryption: No eCryptfs or LUKS partition detected (at-rest disk unencrypted)"
     fi
@@ -869,11 +1079,11 @@ find_tor_apparmor_profile()
 
 dump_tor_logs()
 {
-    info "--- tor@default journal (last 50 lines) ---"
-    journalctl -u tor@default.service -u tor.service -n 50 --no-pager 2>/dev/null || true
+    log_info "--- tor@default journal (last 50 lines) ---"
+    journalctl -u tor@default.service -u tor.service -n 50 --no-pager >&2 || true
     if [[ -f "/var/log/tor/notices.log" ]]; then
-        info "--- /var/log/tor/notices.log (last 20 lines) ---"
-        tail -n 20 /var/log/tor/notices.log 2>/dev/null || true
+        log_info "--- /var/log/tor/notices.log (last 20 lines) ---"
+        tail -n 20 /var/log/tor/notices.log >&2 || true
     fi
 }
 
@@ -1034,7 +1244,7 @@ owner /var/lib/tor/** rwk,
 EOF
 
     if (( DRY_RUN == 1 )); then
-        printf '%s[DRY-RUN]%s write %s and apparmor_parser -r\n' "$CYAN" "$RESET" "$APPARMOR_TOR_LOCAL"
+        log debug "$(printf '%s[DRY-RUN]%s write %s and apparmor_parser -r' "$CYAN" "$RESET" "$APPARMOR_TOR_LOCAL")"
         rm -f "$tmp_aa"
         return 0
     fi
@@ -1130,11 +1340,14 @@ wait_for_tor_bootstrap()
     local bootstrapped=0
     local elapsed=0
     local last_percent=""
-    local tor_state boot_line percent phase_desc
+    local tor_state boot_line percent phase_desc pct_num
+
+    progress_start "Waiting for Tor bootstrap"
 
     while (( elapsed < BOOTSTRAP_TIMEOUT )); do
         tor_state="$(systemctl is-active tor@default.service 2>/dev/null || systemctl is-active tor.service 2>/dev/null || echo 'unknown')"
         if [[ "$tor_state" == "failed" || "$tor_state" == "inactive" ]]; then
+            progress_done
             return 1
         fi
 
@@ -1154,11 +1367,12 @@ wait_for_tor_bootstrap()
             phase_desc="$(printf '%s\n' "$boot_line" | sed -E 's/.*Bootstrapped [0-9]+%[^:]*:\s*//' || true)"
             if [[ -n "$percent" && "$percent" != "$last_percent" ]]; then
                 last_percent="$percent"
-                info "Tor Connection: ${percent}${phase_desc:+ ($phase_desc)}"
+                pct_num="${percent//[^0-9]/}"
+                progress_update "${pct_num:-0}" "$phase_desc"
             fi
             if [[ "$percent" == *"100%"* ]]; then
                 bootstrapped=1
-                info "Tor Connection: ${percent} (${elapsed}s)"
+                progress_update 100 "${elapsed}s"
                 break
             fi
         elif (( elapsed > 0 && elapsed % 10 == 0 )); then
@@ -1169,6 +1383,7 @@ wait_for_tor_bootstrap()
         (( elapsed += BOOTSTRAP_POLL )) || true
     done
 
+    progress_done
     if (( bootstrapped == 1 )); then
         return 0
     fi
@@ -1627,8 +1842,10 @@ EOF
     record_touched_file "$TOUCHED_MANIFEST"
 
     if (( IN_PIPELINE == 0 )); then
-        ok "Setup complete! Run 'sudo ./anonbox check' to audit traffic."
-        info "Touched-files manifest: $TOUCHED_MANIFEST"
+        print_result_card "setup" "complete" \
+            "sudo ./anonbox check" \
+            "Use Tor Browser for interactive browsing (transparent proxy is not anti-fingerprint)" \
+            "Touched-files manifest: $TOUCHED_MANIFEST"
     fi
 }
 
@@ -1999,7 +2216,11 @@ EOF
     run systemctl enable htpdate-tor.service 2>/dev/null || true
 
     ok "Hardening pipeline completed successfully!"
-    info "Recommendation: Reboot the VM to apply kernel cmdline (GRUB) and mount configurations."
+    if (( IN_PIPELINE == 0 )); then
+        print_result_card "harden" "complete" \
+            "Reboot the VM to apply kernel cmdline (GRUB) and mount configurations" \
+            "sudo ./anonbox check"
+    fi
 }
 
 # =============================================================================
@@ -2016,6 +2237,7 @@ cmd_check()
         skip "Skipping active network socket and kernel audit tests in dry-run mode"
         VERDICT="SAFE"
         LAST_EXIT_CODE=0
+        gh_group_end
         if (( JSON_OUT == 1 )); then
             emit_json_report
         fi
@@ -2535,8 +2757,10 @@ cmd_all()
     cmd_harden
 
     phase_header "3" "3" "Security Audit, Leak Detection & Verification"
-    cmd_check
-    return $?
+    local rc=0
+    cmd_check || rc=$?
+    gh_group_end
+    return "$rc"
 }
 
 # =============================================================================
@@ -2553,6 +2777,7 @@ cmd_doctor()
         skip "Doctor dry-run: no live probes"
         VERDICT="SAFE"
         LAST_EXIT_CODE=0
+        gh_group_end
         if (( JSON_OUT == 1 )); then emit_json_report; fi
         return 0
     fi
@@ -2686,46 +2911,44 @@ cmd_status()
         return "$LAST_EXIT_CODE"
     fi
 
-    info "Tor Service Status    : $is_active"
-    info "nftables Firewall     : $nft_active"
-    info "Primary Network NIC   : $IFACE ($LAN_SUBNET)"
+    kv_row "Tor" "$is_active"
+    kv_row "nftables" "$nft_active"
+    kv_row "Interface" "$IFACE ($LAN_SUBNET)"
 
     local current_mac
     current_mac="$(cat "/sys/class/net/${IFACE}/address" 2>/dev/null || ip link show dev "$IFACE" 2>/dev/null | awk '/ether/ {print $2; exit}' || echo 'unknown')"
-    info "Active Hardware MAC   : $current_mac"
+    kv_row "MAC" "$current_mac"
 
     if [[ "$is_active" == "active" ]]; then
         local tor_pid
         tor_pid="$(systemctl show --property MainPID --value tor@default 2>/dev/null || echo '')"
-        [[ -n "$tor_pid" && "$tor_pid" != "0" ]] && info "Tor Main PID          : $tor_pid"
+        [[ -n "$tor_pid" && "$tor_pid" != "0" ]] && kv_row "Tor PID" "$tor_pid"
 
         local current_ip
         current_ip="$(curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 https://check.torproject.org/api/ip 2>/dev/null | grep -o '"IP":"[^"]*' | cut -d'"' -f4 || echo 'Unavailable')"
-        info "Active Tor Exit IP    : $current_ip"
-        info "System Timezone       : $(timedatectl show --property=Timezone --value 2>/dev/null || echo 'unknown')"
+        kv_row "Exit IP" "$current_ip"
+        kv_row "Timezone" "$(timedatectl show --property=Timezone --value 2>/dev/null || echo 'unknown')"
 
-        # Stream Isolation Ports Status
         local port_9050="Inactive" port_9051="Inactive" port_9052="Inactive" port_5353="Inactive"
         if nc -z 127.0.0.1 9050 2>/dev/null; then port_9050="Listening (General / Browsing)"; fi
         if nc -z 127.0.0.1 9051 2>/dev/null; then port_9051="Listening (Financial / Wallets)"; fi
         if nc -z 127.0.0.1 9052 2>/dev/null; then port_9052="Listening (CLI / Automation)"; fi
         if nc -z 127.0.0.1 5353 2>/dev/null || nc -u -z -w 1 127.0.0.1 5353 2>/dev/null; then port_5353="Listening (Tor DNSPort)"; fi
 
-        info "SOCKS5 Stream Ports   : 9050 ($port_9050)"
-        info "                      : 9051 ($port_9051)"
-        info "                      : 9052 ($port_9052)"
-        info "DNS Interception Port : 127.0.0.1:5353 ($port_5353)"
+        kv_row "SOCKS 9050" "$port_9050"
+        kv_row "SOCKS 9051" "$port_9051"
+        kv_row "SOCKS 9052" "$port_9052"
+        kv_row "DNSPort 5353" "$port_5353"
 
         local boot_log
         boot_log="$(journalctl -u tor@default.service -n 20 --no-pager 2>/dev/null | grep "Bootstrapped 100%" | tail -n 1 || echo '')"
         if [[ -n "$boot_log" ]]; then
-            info "Bootstrap State       : 100% (Operational)"
+            kv_row "Bootstrap" "100% (Operational)"
         else
-            info "Bootstrap State       : Active (Review journalctl for progress)"
+            kv_row "Bootstrap" "Active (review journalctl for progress)"
         fi
     fi
 
-    # Storage Encryption Status
     local enc_status="Unencrypted (No eCryptfs or LUKS detected)"
     local ecryptfs_mounts=""
     if [[ -f "/proc/mounts" ]]; then
@@ -2738,7 +2961,8 @@ cmd_status()
     elif command -v dmsetup >/dev/null 2>&1 && dmsetup status --target crypt 2>/dev/null | grep -q ":"; then
         enc_status="Active (dm-crypt)"
     fi
-    info "Storage Encryption    : $enc_status"
+    kv_row "Storage" "$enc_status"
+    print_table
     warn_iface_ip_drift
 }
 
@@ -2765,7 +2989,7 @@ cmd_rollback()
     local i=1
     local b
     for b in "${backups[@]}"; do
-        printf '  [%d] %s\n' "$i" "$(basename "$b")"
+        printf '  [%d] %s\n' "$i" "$(basename "$b")" >&2
         ((i++)) || true
     done
 
@@ -2774,7 +2998,7 @@ cmd_rollback()
         selected="$(resolve_snapshot_dir "$ROLLBACK_SNAPSHOT")"
     elif [[ -t 0 ]]; then
         local sel
-        printf 'Select snapshot number [1-%d]: ' "${#backups[@]}"
+        printf 'Select snapshot number [1-%d]: ' "${#backups[@]}" >&2
         read -r sel
         if [[ ! "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > ${#backups[@]} )); then
             die "Invalid snapshot selection"
@@ -2809,6 +3033,8 @@ cmd_rollback()
     fi
     systemctl restart tor@default 2>/dev/null || true
     ok "Rollback applied and services restarted."
+    print_result_card "rollback" "complete" \
+        "sudo ./anonbox check"
 }
 
 # =============================================================================
@@ -2887,6 +3113,9 @@ cmd_uninstall()
     fi
 
     ok "anonbox uninstalled. Clearnet routing restored with baseline nftables accept policy (not an empty ruleset)."
+    print_result_card "uninstall" "complete" \
+        "Clearnet restored with baseline nftables accept policy" \
+        "Re-run sudo ./anonbox setup to return to fail-closed Tor"
 }
 
 install_baseline_nftables_accept()
@@ -2970,9 +3199,11 @@ Global options:
   --verbose, -v         Enable detailed output and command tracing
   --dry-run             Preview actions without making system changes
   --yes, -y             Assume yes for prompts (SSH preflight, uninstall/rollback)
-  --quiet, -q           Suppress step output; print summary (and Next steps) only
-  --json                Machine-readable report (check, doctor, status)
-  --no-color            Disable ANSI colors (also respects NO_COLOR=1)
+  --quiet, -q, --silent
+                        Suppress PASS/OK/info; still print FAIL/WARN and the result card
+  --json                Machine-readable report on stdout (check, doctor, status)
+  --color MODE          auto (default), always, or never (also --color=auto|always|never)
+  --no-color            Disable ANSI colors (also NO_COLOR=1, TERM=dumb; FORCE_COLOR enables in auto)
   --log-file NAME       Session log basename under /var/log/anonbox/ only (no absolute paths)
   --no-log              Disable session logging
 
@@ -3007,7 +3238,8 @@ anonbox setup — Tor transparent proxy, nftables, DNS
 
 Usage: sudo ./anonbox setup [options]
 Options: --bridges-file FILE | --no-bridges | --allow-ssh | --iface IFACE
-         --yes | --verbose | --dry-run | --quiet | --no-color | --log-file PATH | --no-log
+         --yes | --verbose | --dry-run | --quiet | --silent | --no-color | --color MODE
+         --log-file PATH | --no-log
 EOF
             ;;
         harden)
@@ -3015,7 +3247,8 @@ EOF
 anonbox harden — OS/kernel/session hardening
 
 Usage: sudo ./anonbox harden [options]
-Options: --iface IFACE | --yes | --verbose | --dry-run | --quiet | --no-color | --log-file PATH | --no-log
+Options: --iface IFACE | --yes | --verbose | --dry-run | --quiet | --silent | --no-color
+         --color MODE | --log-file PATH | --no-log
 EOF
             ;;
         check)
@@ -3023,8 +3256,8 @@ EOF
 anonbox check — Leak detection and hardening audit
 
 Usage: sudo ./anonbox check [options]
-Options: --no-kill-switch | --json | --quiet | --iface IFACE
-         --verbose | --dry-run | --no-color | --log-file PATH | --no-log
+Options: --no-kill-switch | --json | --quiet | --silent | --iface IFACE
+         --verbose | --dry-run | --no-color | --color MODE | --log-file PATH | --no-log
 
 Release gate: run without --no-kill-switch.
 Exit codes: 0=SAFE, 1=leak/network, 2=hardening/storage.
@@ -3035,8 +3268,8 @@ EOF
 anonbox doctor — Read-only diagnostics (no kill-switch)
 
 Usage: sudo ./anonbox doctor [options]
-Options: --json | --quiet | --iface IFACE | --allow-ssh (affects SSH risk WARN only)
-         --verbose | --dry-run | --no-color | --log-file PATH | --no-log
+Options: --json | --quiet | --silent | --iface IFACE | --allow-ssh (affects SSH risk WARN only)
+         --verbose | --dry-run | --no-color | --color MODE | --log-file PATH | --no-log
 EOF
             ;;
         all)
@@ -3045,7 +3278,8 @@ anonbox all — setup -> harden -> check
 
 Usage: sudo ./anonbox all [options]
 Options: --bridges-file FILE | --no-bridges | --allow-ssh | --iface IFACE
-         --yes | --verbose | --dry-run | --quiet | --json | --no-color | --log-file PATH | --no-log
+         --yes | --verbose | --dry-run | --quiet | --silent | --json | --no-color | --color MODE
+         --log-file PATH | --no-log
          --no-kill-switch (passed through to final check)
 EOF
             ;;
@@ -3054,7 +3288,7 @@ EOF
 anonbox status — Tor/nftables operational status
 
 Usage: ./anonbox status [options]
-Options: --json | --iface IFACE | --verbose | --quiet | --no-color
+Options: --json | --iface IFACE | --verbose | --quiet | --silent | --no-color | --color MODE
 EOF
             ;;
         uninstall)
@@ -3120,7 +3354,7 @@ parse_options()
                 NO_KILL_SWITCH=1
                 shift
                 ;;
-            --quiet|-q)
+            --quiet|-q|--silent)
                 QUIET=1
                 shift
                 ;;
@@ -3128,8 +3362,34 @@ parse_options()
                 JSON_OUT=1
                 shift
                 ;;
+            --color)
+                [[ $# -lt 2 ]] && die "--color requires auto|always|never"
+                case "$2" in
+                    auto|always|never) COLOR_MODE="$2" ;;
+                    *) die "Invalid --color: $2 (use auto|always|never)" ;;
+                esac
+                if [[ "$COLOR_MODE" == "never" ]]; then
+                    NO_COLOR_FLAG=1
+                else
+                    NO_COLOR_FLAG=0
+                fi
+                shift 2
+                ;;
+            --color=auto|--color=always|--color=never)
+                COLOR_MODE="${1#*=}"
+                if [[ "$COLOR_MODE" == "never" ]]; then
+                    NO_COLOR_FLAG=1
+                else
+                    NO_COLOR_FLAG=0
+                fi
+                shift
+                ;;
+            --color=*)
+                die "Invalid --color: ${1#*=} (use auto|always|never)"
+                ;;
             --no-color)
                 NO_COLOR_FLAG=1
+                COLOR_MODE="never"
                 shift
                 ;;
             --log-file)
@@ -3171,7 +3431,7 @@ main()
 
     init_colors
 
-    if [[ "$command" == "help" || "$command" == "-h" ]]; then
+    if [[ "$command" == "help" || "$command" == "-h" || "$command" == "--help" ]]; then
         show_help
         exit 0
     fi

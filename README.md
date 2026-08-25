@@ -123,8 +123,11 @@ sudo ./anonbox harden [--iface IFACE] [--dry-run] [--verbose]
 sudo ./anonbox check
 # Frequent triage without stopping Tor (not a release gate):
 sudo ./anonbox check --no-kill-switch
-# Machine-readable:
+# Machine-readable (stdout = one JSON object; human logs on stderr):
 sudo ./anonbox check --json --quiet
+
+# Quiet human audit: FAIL/WARN + result card only
+sudo ./anonbox check --quiet
 
 # Read-only diagnostics with Fix hints (no kill-switch)
 sudo ./anonbox doctor
@@ -140,6 +143,8 @@ sudo ./anonbox uninstall --yes
 ```
 
 **Exit codes** (`check` / `doctor` / `all`): `0` SAFE, `1` leak/network/Tor failure, `2` hardening/storage only.
+
+**Output:** humans on **stderr** (progress, FAIL/WARN, result card). `--json` prints one object on **stdout** (do not parse human tables). `--silent` is an alias of `--quiet`. Colors follow stderr TTY, `NO_COLOR`, `TERM=dumb`, `FORCE_COLOR`, and `--color=auto|always|never`.
 
 **Session log:** basename only under `/var/log/anonbox/` (`--log-file NAME`). Absolute paths rejected.
 

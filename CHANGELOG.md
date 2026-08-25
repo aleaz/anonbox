@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Path jail for `--snapshot` (`resolve_snapshot_dir` / `resolve_under_dir`); reject `..` and symlinks.
-- `--log-file` accepts basename under `/var/log/anonbox/` only; session logging via `log_append` (no `exec > >(tee)`).
+- `--log-file` accepts basename under `/var/log/anonbox/` only; session log uses **separate** stdout/stderr tees (never mixed `2>&1`); `--json` does not tee stdout.
 - `--bridges-file` allowlists `Bridge` lines only (`append_bridges_from_file`); rejects other directives and symlinks.
 - Kill-switch requires Tor inactive + live `tor_*` nft tables + classified curl failure (exit 6/7/28/52/56); HTTP success while Tor down is FAIL; inconclusive exits are FAIL (not silent PASS).
 - `uninstall` ends with loaded baseline accept nftables (or validated restored non-tor conf); never flush+disable as sole end-state.
@@ -26,7 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `doctor` read-only diagnostics (no kill-switch); `check --no-kill-switch` for frequent audits (release gate still requires full check).
 - Preflight on `setup`/`all`: bridges validation, SSH lockout prompt, swap/LUKS warnings; `--yes`/`-y` skips prompts.
 - Destructive confirmations for `uninstall`/`rollback` (type `uninstall`/`yes`, or `--yes`).
-- Output flags: `--quiet`/`-q`, `--json` (check/doctor/status), `--no-color` / `NO_COLOR`, session log under `/var/log/anonbox/` (`--log-file` / `--no-log`).
+- Output flags: `--quiet`/`-q`/`--silent`, `--json` (check/doctor/status), `--color=auto|always|never`, `--no-color` / `NO_COLOR` / `TERM=dumb` / `FORCE_COLOR`, session log under `/var/log/anonbox/` (`--log-file` / `--no-log`).
+- Human CLI UX (stderr): `log_*` helpers, TTY bootstrap `\r` bar, kv tables (`status`), result cards (`setup`/`harden`/`uninstall`/`rollback`), `==> [n/N]` phase lines, GitHub Actions `::group::` phases. `--quiet` still prints FAIL/WARN + the result card; PASS is hidden unless `--verbose` (or inside a CI group). Audit summary lists **Failures** and **Warnings**.
 - Per-command help (`anonbox check --help`); bash completion in `completions/anonbox.bash`.
 - Stream isolation test retries; clearer transient WARN when SOCKS already passed.
 

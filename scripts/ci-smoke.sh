@@ -63,6 +63,14 @@ grep -q 'NO_KILL_SWITCH' ./anonbox || fail "--no-kill-switch support missing"
 grep -q 'ASSUME_YES' ./anonbox || fail "--yes support missing"
 grep -q 'JSON_OUT' ./anonbox || fail "--json support missing"
 grep -q 'print_audit_summary' ./anonbox || fail "print_audit_summary missing"
+grep -q 'print_result_card' ./anonbox || fail "print_result_card missing"
+grep -q 'log_fail' ./anonbox || fail "log_fail helper missing"
+grep -q 'progress_update' ./anonbox || fail "progress_update helper missing"
+grep -q 'is_stderr_tty' ./anonbox || fail "is_stderr_tty helper missing"
+grep -q 'FORCE_COLOR' ./anonbox || fail "FORCE_COLOR support missing"
+grep -qE 'TERM=dumb|TERM:-' ./anonbox || fail "TERM=dumb color handling missing"
+grep -q -- '--silent' ./anonbox || fail "--silent alias missing"
+grep -q '::group::' ./anonbox || fail "GitHub Actions ::group:: missing"
 grep -q 'Exit code: %d (0=SAFE, 1=leak/network, 2=hardening/storage)' ./anonbox || fail "exit code legend missing"
 grep -q '\[PHASE' ./anonbox || fail "PHASE banners missing (English UI)"
 [[ -f ./completions/anonbox.bash ]] || fail "completions/anonbox.bash missing"
@@ -79,9 +87,10 @@ grep -q 'log_append' ./anonbox || fail "log_append missing"
 grep -q 'anonbox_mktemp' ./anonbox || fail "anonbox_mktemp missing"
 grep -q 'ss_listens_tcp' ./anonbox || fail "ss_listens_tcp missing"
 grep -q 'CURRENT_SNAPSHOT_ID=.*_\$\$' ./anonbox || fail "snapshot ID must include PID"
-if grep -q 'exec > >(tee' ./anonbox; then
-  fail "exec tee session logging must remain removed"
+if grep -qE 'exec > >\(tee[^)]*\) 2>&1' ./anonbox; then
+  fail "mixed stdout/stderr session tee (2>&1) is forbidden; use separate tees"
 fi
+grep -q 'exec 2> >(tee -a' ./anonbox || fail "separate stderr session tee missing"
 if grep -q 'nft flush ruleset 2>/dev/null || true' ./anonbox && grep -q 'disable --now nftables' ./anonbox; then
   # uninstall must not use flush+disable as sole end-state; baseline helper required
   grep -q 'install_baseline_nftables_accept' ./anonbox || fail "uninstall flush without baseline helper"
@@ -90,6 +99,20 @@ grep -q 'classified drop\|curl exit' ./anonbox || fail "kill-switch curl exit cl
 grep -q 'Tor inactive; nft tor_' ./anonbox || true
 grep -q 'ks_code == 28' ./anonbox || fail "kill-switch classified curl exits missing"
 pass "audit remediation asserts"
+
+# Stream isolation: JSON on stdout, humans on stderr
+./anonbox doctor --json --dry-run >/tmp/anonbox-json.out 2>/tmp/anonbox-json.err || fail "doctor --json --dry-run failed"
+grep -q '^{' /tmp/anonbox-json.out || fail "JSON stdout must start with {"
+if grep -q '^{' /tmp/anonbox-json.err; then
+  fail "JSON leaked to stderr"
+fi
+./anonbox doctor --dry-run >/tmp/anonbox-human.out 2>/tmp/anonbox-human.err || fail "doctor --dry-run failed"
+if grep -q '\[ SKIP \]\|\[PASS\]\|Doctor' /tmp/anonbox-human.out; then
+  fail "human logs leaked to stdout (expected stderr)"
+fi
+./anonbox help | grep -q -- '--silent' || fail "help missing --silent"
+./anonbox version | grep -q 'anonbox v' || fail "version output missing"
+pass "JSON/stderr stream isolation"
 
 # Per-command help
 ./anonbox check --help 2>&1 | grep -q 'no-kill-switch' || fail "check --help missing --no-kill-switch"

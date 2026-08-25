@@ -9,7 +9,7 @@ _anonbox()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD - 1]}"
     commands="setup harden check doctor all status rollback uninstall version help"
-    opts="--bridges-file --no-bridges --iface --snapshot --allow-ssh --yes -y --no-kill-switch --quiet -q --json --no-color --log-file --no-log --verbose -v --dry-run --help -h"
+    opts="--bridges-file --no-bridges --iface --snapshot --allow-ssh --yes -y --no-kill-switch --quiet -q --silent --json --no-color --color --log-file --no-log --verbose -v --dry-run --help -h"
 
     if [[ ${COMP_CWORD} -eq 1 ]]; then
         # shellcheck disable=SC2207
@@ -31,6 +31,11 @@ _anonbox()
         --snapshot)
             # shellcheck disable=SC2207
             COMPREPLY=( $(compgen -W "$(ls /var/backups/anonbox 2>/dev/null)" -- "${cur}") )
+            return 0
+            ;;
+        --color)
+            # shellcheck disable=SC2207
+            COMPREPLY=( $(compgen -W "auto always never" -- "${cur}") )
             return 0
             ;;
     esac
