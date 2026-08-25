@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-25
+
+### Fixed
+
+- Markdownlint: MD004 list markers in ARCHITECTURE storage note; MD028 blank line between README admonitions (CI green).
+- `check`/`doctor --dry-run` no longer report `SAFE`/exit 0; verdict `DRY-RUN` and exit `2` so automation cannot false-pass a release gate.
+- `storage_encrypted` requires root on dm-crypt (or active eCryptfs), not merely any unused `crypto_LUKS` disk.
+- ShellCheck SC2120/SC2015 hygiene; status/summary storage display aligned with SAFE encryption check.
+- ARCHITECTURE bridge ingestion docs match Bridge-line allowlist behavior.
+
+### Changed
+
+- Version **1.2.1**.
+
 ## [1.2.0] - 2026-08-25
 
 ### Security

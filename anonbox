@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="1.2.0"
+VERSION="1.2.1"
 
 # =============================================================================
 # Global Configurations & File Paths
@@ -1002,15 +1002,13 @@ show_system_summary()
     kv_row "Tor user" "$TOR_USER (UID: $TOR_UID)"
 
     local enc_found=0
-    if [[ -f "/proc/mounts" ]] && grep -qE "[[:space:]]ecryptfs[[:space:]]" /proc/mounts 2>/dev/null; then
+    if storage_encrypted; then
         enc_found=1
-        kv_row "Storage" "Active (eCryptfs mounted)"
-    elif command -v lsblk >/dev/null 2>&1 && lsblk -f 2>/dev/null | grep -qE "crypto_LUKS|crypt"; then
-        enc_found=1
-        kv_row "Storage" "Active (LUKS / dm-crypt)"
-    elif command -v dmsetup >/dev/null 2>&1 && dmsetup status --target crypt 2>/dev/null | grep -q ":"; then
-        enc_found=1
-        kv_row "Storage" "Active (dm-crypt)"
+        if [[ -f "/proc/mounts" ]] && grep -qE "[[:space:]]ecryptfs[[:space:]]" /proc/mounts 2>/dev/null; then
+            kv_row "Storage" "Active (eCryptfs mounted)"
+        else
+            kv_row "Storage" "Active (root on dm-crypt / LUKS)"
+        fi
     fi
     print_table
     if (( enc_found == 0 )); then
@@ -1153,7 +1151,7 @@ EOF
 # Non-loopback TransPort IPv4 from torrc (nft redirect target), or empty.
 torrc_transport_nic_ip()
 {
-    local f="${1:-$TORRC}"
+    local f="$TORRC"
     [[ -f "$f" ]] || { printf '\n'; return 0; }
     grep -E '^[[:space:]]*TransPort[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:9040' "$f" 2>/dev/null \
         | grep -Ev '127\.0\.0\.1' \
@@ -1447,14 +1445,17 @@ start_tor_or_die()
 
 storage_encrypted()
 {
+    # Active ecryptfs (typically home) counts as in-use encryption.
     if [[ -f "/proc/mounts" ]] && awk '$3 == "ecryptfs" { found=1 } END { exit !found }' /proc/mounts 2>/dev/null; then
         return 0
     fi
-    if command -v lsblk >/dev/null 2>&1 && lsblk -f 2>/dev/null | grep -qE "crypto_LUKS|[[:space:]]crypt[[:space:]]"; then
-        return 0
-    fi
-    if command -v dmsetup >/dev/null 2>&1 && dmsetup status --target crypt 2>/dev/null | grep -q ":"; then
-        return 0
+    # Root filesystem must sit on a dm-crypt device (not merely any LUKS partition present).
+    local root_src
+    root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    if [[ -n "$root_src" ]] && command -v lsblk >/dev/null 2>&1; then
+        if lsblk -n -o TYPE -s "$root_src" 2>/dev/null | grep -qx crypt; then
+            return 0
+        fi
     fi
     return 1
 }
@@ -1471,7 +1472,9 @@ restore_snapshot_files()
     restore_one "${snap}/fstab" "$FSTAB"
     if [[ -f "${snap}/grub" ]]; then
         restore_one "${snap}/grub" "$GRUB_DEFAULT"
-        command -v update-grub >/dev/null 2>&1 && update-grub || true
+        if command -v update-grub >/dev/null 2>&1; then
+            update-grub || true
+        fi
     fi
     restore_one "${snap}/login.defs" "$LOGIN_DEFS"
     restore_one "${snap}/common-session" "$PAM_COMMON_SESSION"
@@ -2238,13 +2241,14 @@ cmd_check()
 
     if (( DRY_RUN == 1 )); then
         skip "Skipping active network socket and kernel audit tests in dry-run mode"
-        VERDICT="SAFE"
-        LAST_EXIT_CODE=0
+        warn "Dry-run is not a live audit — do not treat this result as SAFE for a release gate"
+        VERDICT="DRY-RUN"
+        LAST_EXIT_CODE=2
         gh_group_end
         if (( JSON_OUT == 1 )); then
             emit_json_report
         fi
-        return 0
+        return "$LAST_EXIT_CODE"
     fi
 
     require_root
@@ -2778,11 +2782,12 @@ cmd_doctor()
 
     if (( DRY_RUN == 1 )); then
         skip "Doctor dry-run: no live probes"
-        VERDICT="SAFE"
-        LAST_EXIT_CODE=0
+        warn "Dry-run is not a live audit — do not treat this result as SAFE for a release gate"
+        VERDICT="DRY-RUN"
+        LAST_EXIT_CODE=2
         gh_group_end
         if (( JSON_OUT == 1 )); then emit_json_report; fi
-        return 0
+        return "$LAST_EXIT_CODE"
     fi
 
     local tor_active=0
@@ -2952,17 +2957,15 @@ cmd_status()
         fi
     fi
 
-    local enc_status="Unencrypted (No eCryptfs or LUKS detected)"
+    local enc_status="Unencrypted (root not on dm-crypt; no eCryptfs)"
     local ecryptfs_mounts=""
     if [[ -f "/proc/mounts" ]]; then
         ecryptfs_mounts="$(awk '$3 == "ecryptfs" { print $2 }' /proc/mounts 2>/dev/null | tr '\n' ' ' || echo '')"
     fi
     if [[ -n "$ecryptfs_mounts" ]]; then
         enc_status="Active (eCryptfs on ${ecryptfs_mounts% })"
-    elif command -v lsblk >/dev/null 2>&1 && lsblk -f 2>/dev/null | grep -qE "crypto_LUKS|crypt"; then
-        enc_status="Active (LUKS / dm-crypt block encryption)"
-    elif command -v dmsetup >/dev/null 2>&1 && dmsetup status --target crypt 2>/dev/null | grep -q ":"; then
-        enc_status="Active (dm-crypt)"
+    elif storage_encrypted; then
+        enc_status="Active (root filesystem on dm-crypt / LUKS)"
     fi
     kv_row "Storage" "$enc_status"
     print_table

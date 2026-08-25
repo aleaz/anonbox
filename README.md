@@ -4,7 +4,7 @@
 
 ## *A small toolkit that quickly turns a standard Debian guest VM into a fail-closed Tor workstation.*
 
-[![Release](https://img.shields.io/badge/release-v1.2.0-7D4698.svg?style=flat-square&logo=github)](https://github.com/aleaz/anonbox/releases)
+[![Release](https://img.shields.io/badge/release-v1.2.1-7D4698.svg?style=flat-square&logo=github)](https://github.com/aleaz/anonbox/releases)
 [![Debian: 12 | 13](https://img.shields.io/badge/Debian-12%20(Bookworm)%20%7C%2013%20(Trixie)-D70A53.svg?style=flat-square&logo=debian&logoColor=white)](https://www.debian.org/)
 [![Tor: Transparent Proxy](https://img.shields.io/badge/Tor-Transparent%20Proxy-7D4698.svg?style=flat-square&logo=torproject&logoColor=white)](https://www.torproject.org/)
 [![Hardening: KSPP & Tails](https://img.shields.io/badge/Hardening-KSPP%20%7C%20Tails%20Standard-success.svg?style=flat-square&logo=linux&logoColor=white)](docs/ARCHITECTURE.md)
@@ -32,6 +32,8 @@
 
 > [!WARNING]
 > **Dedicated VM only.** Run `anonbox` inside a guest (UTM / VirtualBox / KVM). **Do not** run it on your daily host or trusted bare metal: hardening closes inbound access by default, can lock you out, and a compromised host defeats the guest (see [SECURITY.md](SECURITY.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)).
+
+---
 
 > [!IMPORTANT]
 > **What this is:** a small Debian toolkit (one main script + docs) that quickly provisions a fail-closed Tor workstation on a **standard Debian 12/13 VM**. It is **not** Tails, Whonix, an amnesic Live OS, or a new anonymous operating system. Persistence is intentional; discard sessions via [hypervisor snapshots](docs/HYPERVISORS.md).

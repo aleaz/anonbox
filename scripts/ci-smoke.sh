@@ -102,15 +102,25 @@ grep -q 'ks_code == 28' ./anonbox || fail "kill-switch classified curl exits mis
 pass "audit remediation asserts"
 
 # Stream isolation: JSON on stdout, humans on stderr
-./anonbox doctor --json --dry-run >/tmp/anonbox-json.out 2>/tmp/anonbox-json.err || fail "doctor --json --dry-run failed"
+set +e
+./anonbox doctor --json --dry-run >/tmp/anonbox-json.out 2>/tmp/anonbox-json.err
+doc_rc=$?
+set -e
+[[ "$doc_rc" -eq 2 ]] || fail "doctor --json --dry-run must exit 2 (DRY-RUN), got $doc_rc"
 grep -q '^{' /tmp/anonbox-json.out || fail "JSON stdout must start with {"
+grep -q '"verdict":"DRY-RUN"' /tmp/anonbox-json.out || fail "dry-run JSON verdict must be DRY-RUN"
 if grep -q '^{' /tmp/anonbox-json.err; then
   fail "JSON leaked to stderr"
 fi
-./anonbox doctor --dry-run >/tmp/anonbox-human.out 2>/tmp/anonbox-human.err || fail "doctor --dry-run failed"
-if grep -q '\[ SKIP \]\|\[PASS\]\|Doctor' /tmp/anonbox-human.out; then
+set +e
+./anonbox doctor --dry-run >/tmp/anonbox-human.out 2>/tmp/anonbox-human.err
+doc_rc=$?
+set -e
+[[ "$doc_rc" -eq 2 ]] || fail "doctor --dry-run must exit 2 (DRY-RUN), got $doc_rc"
+if grep -q '\[ SKIP \]\|\[PASS\]\|Doctor\|DRY-RUN\|dry-run' /tmp/anonbox-human.out; then
   fail "human logs leaked to stdout (expected stderr)"
 fi
+grep -q 'DRY-RUN\|Dry-run' /tmp/anonbox-human.err || fail "human dry-run should mention DRY-RUN on stderr"
 ./anonbox help | grep -q -- '--silent' || fail "help missing --silent"
 ./anonbox version | grep -q 'anonbox v' || fail "version output missing"
 pass "JSON/stderr stream isolation"

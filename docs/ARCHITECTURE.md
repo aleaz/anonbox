@@ -110,7 +110,7 @@ Rather than pooling all application traffic through a single Tor circuit, `anonb
 For operation in heavily filtered networks (such as state-level DPI firewalls), `anonbox` supports pluggable transports:
 
 * **Pluggable Transport Binaries:** `obfs4` and `webtunnel` use `/usr/bin/obfs4proxy` or `/usr/bin/lyrebird`. `ClientTransportPlugin snowflake` is emitted only when `/usr/bin/snowflake-client` exists.
-* **Bridge Ingestion Pipeline:** When `--bridges-file <file>` is provided, the installer strips comments (`#`) and empty lines, injects `UseBridges 1` and remaining lines into `/etc/tor/torrc`.
+* **Bridge Ingestion Pipeline:** When `--bridges-file <file>` is provided, the installer allowlists only lines that start with the `Bridge` keyword (comments/empties ignored; other torrc directives rejected), injects `UseBridges 1`, then runs `tor --verify-config` and `assert_torrc_safe_binds` before start.
 * **Start gate (`start_tor_or_die`):** Syntax is checked with `tor --verify-config`, listeners must not use `0.0.0.0`, `tor@default` must become `active`, `ss` must show expected binds, and bootstrap must reach 100% or setup aborts. AppArmor for Tor is applied **before** this start.
 
 ---
@@ -171,10 +171,10 @@ For operation in heavily filtered networks (such as state-level DPI firewalls), 
 > [!IMPORTANT]
 > `anonbox` is a **persistent** virtual workstation (not a RAM-only Live ISO like Tails). **Disk encryption is your responsibility** at Debian install time — the toolkit does **not** set up LUKS/eCryptfs.
 >
-> - The script **runs without** encryption (setup does not abort).
-> - **Keep data** on the VM → enable LUKS2 (preferred) or eCryptfs (**recommended**).
-> - **Throwaway** / discard disk / revert [hypervisor snapshot](HYPERVISORS.md) → encryption optional.
-> - `anonbox check` reports **SAFE** only when LUKS or eCryptfs is detected (`FAIL` if missing). Without a passphrase, cleartext disk images on the host remain readable.
+> * The script **runs without** encryption (setup does not abort).
+> * **Keep data** on the VM → enable LUKS2 (preferred) or eCryptfs (**recommended**).
+> * **Throwaway** / discard disk / revert [hypervisor snapshot](HYPERVISORS.md) → encryption optional.
+> * `anonbox check` reports **SAFE** only when LUKS or eCryptfs is detected (`FAIL` if missing). Without a passphrase, cleartext disk images on the host remain readable.
 
 ## 6. IFACE_IP / TransPort drift
 
