@@ -84,7 +84,7 @@ NO_COLOR_FLAG=0
 NO_LOG=0
 LOG_FILE=""
 SESSION_LOG=""
-CURRENT_SNAPSHOT_ID="$(date +%Y%m%d_%H%M%S)"
+CURRENT_SNAPSHOT_ID="$(date +%Y%m%d_%H%M%S)_$$"
 HELP_TOPIC=0
 
 # Counters
@@ -134,12 +134,20 @@ init_colors()
 init_colors
 
 # Human output suppressed when quiet or JSON mode (counts still update).
+log_append()
+{
+    [[ -n "${SESSION_LOG:-}" ]] || return 0
+    printf '%s\n' "$1" >> "$SESSION_LOG" 2>/dev/null || true
+}
+
 emit()
 {
     if (( QUIET == 1 || JSON_OUT == 1 )); then
+        log_append "$1"
         return 0
     fi
     printf '%s\n' "$1"
+    log_append "$1"
 }
 
 ok()
@@ -195,8 +203,18 @@ section()
 }
 die()
 {
-    printf '\n%s[ERROR]%s %s\n' "$RED" "$RESET" "$1" >&2
+    local msg
+    msg="$(printf '\n%s[ERROR]%s %s' "$RED" "$RESET" "$1")"
+    printf '%s\n' "$msg" >&2
+    log_append "[ERROR] $1"
     exit 1
+}
+
+die_invalid_opt()
+{
+    local flag="$1"
+    local reason="$2"
+    die "Invalid ${flag}: ${reason}"
 }
 
 # fail_fix MSG HINT [ID] [severity]
@@ -267,6 +285,199 @@ require_root()
     fi
 }
 
+# --- Input validation & path jail (audit remediation) ---
+
+is_ipv4()
+{
+    local ip="$1"
+    local o1 o2 o3 o4
+    [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    o1="${BASH_REMATCH[1]}"
+    o2="${BASH_REMATCH[2]}"
+    o3="${BASH_REMATCH[3]}"
+    o4="${BASH_REMATCH[4]}"
+    (( o1 <= 255 && o2 <= 255 && o3 <= 255 && o4 <= 255 )) || return 1
+    return 0
+}
+
+validate_iface()
+{
+    local name="$1"
+    if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,14}$ ]]; then
+        die_invalid_opt "--iface" "interface name rejected (charset/length): $name"
+    fi
+    if (( DRY_RUN == 1 )); then
+        return 0
+    fi
+    if [[ ! -e "/sys/class/net/${name}" ]]; then
+        die_invalid_opt "--iface" "interface not found: $name"
+    fi
+}
+
+# Resolve CANDIDATE under BASE; print absolute path. Fail closed on escape/symlink leaf.
+resolve_under_dir()
+{
+    local base="$1"
+    local candidate="$2"
+    local base_real cand_real
+    mkdir -p "$base" 2>/dev/null || true
+    if command -v realpath >/dev/null 2>&1; then
+        base_real="$(realpath "$base" 2>/dev/null || true)"
+        cand_real="$(realpath -m "$candidate" 2>/dev/null || true)"
+    else
+        base_real="$(cd "$base" 2>/dev/null && pwd -P)"
+        cand_real="$candidate"
+    fi
+    [[ -n "$base_real" && -n "$cand_real" ]] || die "Path resolution failed for: $candidate"
+    case "$cand_real" in
+        "$base_real"|"$base_real"/*) ;;
+        *) die "Path escapes allowed directory ${base}: $candidate" ;;
+    esac
+    if [[ -L "$candidate" ]] || [[ -L "$cand_real" ]]; then
+        die "Symlink targets are not allowed: $candidate"
+    fi
+    printf '%s\n' "$cand_real"
+}
+
+resolve_snapshot_dir()
+{
+    local id="$1"
+    if [[ ! "$id" =~ ^[0-9]{8}_[0-9]{6}(_[0-9]+)?$ ]]; then
+        die_invalid_opt "--snapshot" "ID must match YYYYMMDD_HHMMSS or YYYYMMDD_HHMMSS_PID (got: $id)"
+    fi
+    local path
+    path="$(resolve_under_dir "$BACKUP_DIR" "${BACKUP_DIR}/${id}")"
+    [[ -d "$path" ]] || die "Snapshot not found: $id (expected directory $path)"
+    if [[ -L "${BACKUP_DIR}/${id}" ]]; then
+        die_invalid_opt "--snapshot" "snapshot directory must not be a symlink: $id"
+    fi
+    printf '%s\n' "$path"
+}
+
+resolve_session_log_path()
+{
+    local spec="$1"
+    local target
+    if [[ -z "$spec" ]]; then
+        mkdir -p "$ANONBOX_LOG_DIR"
+        chmod 700 "$ANONBOX_LOG_DIR" 2>/dev/null || true
+        target="${ANONBOX_LOG_DIR}/anonbox-$(date +%Y%m%d-%H%M%S).log"
+        resolve_under_dir "$ANONBOX_LOG_DIR" "$target"
+        return 0
+    fi
+    if [[ "$spec" == *".."* ]]; then
+        die_invalid_opt "--log-file" "path must not contain '..'"
+    fi
+    if [[ "$spec" == /* ]]; then
+        die_invalid_opt "--log-file" "absolute paths rejected; use a basename under ${ANONBOX_LOG_DIR}"
+    fi
+    if [[ "$spec" == */* ]]; then
+        die_invalid_opt "--log-file" "only a basename is allowed (got: $spec)"
+    fi
+    if [[ ! "$spec" =~ ^[A-Za-z0-9._+-]+$ ]]; then
+        die_invalid_opt "--log-file" "invalid basename: $spec"
+    fi
+    mkdir -p "$ANONBOX_LOG_DIR"
+    chmod 700 "$ANONBOX_LOG_DIR" 2>/dev/null || true
+    resolve_under_dir "$ANONBOX_LOG_DIR" "${ANONBOX_LOG_DIR}/${spec}"
+}
+
+anonbox_mktemp()
+{
+    local prev_umask
+    prev_umask="$(umask)"
+    umask 077
+    mktemp "${TMPDIR:-/tmp}/anonbox.XXXXXX"
+    umask "$prev_umask"
+}
+
+require_regular_file()
+{
+    local path="$1"
+    local label="${2:-file}"
+    [[ -e "$path" ]] || die "${label} not found: $path"
+    [[ -f "$path" ]] || die "${label} is not a regular file: $path"
+    [[ ! -L "$path" ]] || die "${label} must not be a symlink: $path"
+}
+
+append_bridges_from_file()
+{
+    local bridges_file="$1"
+    local torrc_tmp="$2"
+    local line lineno=0 count=0
+    require_regular_file "$bridges_file" "Bridges file"
+    printf '\n# --- Injected Bridges ---\nUseBridges 1\n' >> "$torrc_tmp"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        ((lineno++)) || true
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        if [[ "$line" =~ ^[[:space:]]*Bridge[[:space:]]+ ]]; then
+            printf '%s\n' "$line" >> "$torrc_tmp"
+            ((count++)) || true
+        else
+            die "Bridges file line ${lineno}: only 'Bridge ...' lines allowed (got: ${line})"
+        fi
+    done < "$bridges_file"
+    (( count >= 1 )) || die "Bridges file has no active 'Bridge ...' lines: $bridges_file"
+}
+
+ss_listens_tcp()
+{
+    local addr="$1"
+    local port="$2"
+    local listen
+    listen="$(ss -lntH "sport = :${port}" 2>/dev/null || true)"
+    printf '%s\n' "$listen" | grep -Fq "${addr}:${port}"
+}
+
+ss_listens_udp()
+{
+    local addr="$1"
+    local port="$2"
+    local listen
+    listen="$(ss -lnuH "sport = :${port}" 2>/dev/null || true)"
+    printf '%s\n' "$listen" | grep -Fq "${addr}:${port}"
+}
+
+# Prints IP\nIsTor (IsTor as true/false/empty). Uses python3 JSON when available.
+tor_check_api_json()
+{
+    local url="${1:-https://check.torproject.org/api/ip}"
+    local max_time="${2:-20}"
+    local body
+    body="$(curl -fsS --max-time "$max_time" "$url" 2>/dev/null || true)"
+    [[ -n "$body" ]] || { printf '\n\n'; return 1; }
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$body" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin)
+    print(d.get("IP") or "")
+    v=d.get("IsTor")
+    if v is True: print("true")
+    elif v is False: print("false")
+    else: print("" if v is None else str(v).lower())
+except Exception:
+    print("")
+    print("")
+    sys.exit(1)' 2>/dev/null || { printf '\n\n'; return 1; }
+        return 0
+    fi
+    local ip is_tor
+    ip="$(printf '%s' "$body" | grep -o '"IP":"[^"]*' | cut -d'"' -f4 || true)"
+    is_tor="$(printf '%s' "$body" | grep -o '"IsTor":[^,}]*' | cut -d':' -f2 | tr -d ' ' || true)"
+    printf '%s\n%s\n' "${ip:-}" "${is_tor:-}"
+}
+
+restore_one()
+{
+    local src="$1"
+    local dest="$2"
+    [[ -f "$src" ]] || return 0
+    mkdir -p "$(dirname "$dest")" 2>/dev/null || true
+    cp "$src" "$dest" || die "Failed restoring $dest from snapshot"
+    ok "Restored $dest"
+}
+
 confirm_or_die()
 {
     local prompt="$1"
@@ -333,7 +544,7 @@ preflight_checks()
         die "Conflicting options: --bridges-file and --no-bridges cannot be used together."
     fi
     if [[ -n "$BRIDGES_FILE" ]]; then
-        [[ -f "$BRIDGES_FILE" ]] || die "Bridges file not found: $BRIDGES_FILE"
+        require_regular_file "$BRIDGES_FILE" "Bridges file"
         if ! grep -qE '^[[:space:]]*Bridge[[:space:]]+' "$BRIDGES_FILE" 2>/dev/null; then
             die "Bridges file has no active 'Bridge ...' lines: $BRIDGES_FILE"
         fi
@@ -504,18 +715,16 @@ start_session_log()
     if [[ "$(id -u)" -ne 0 ]]; then
         return 0
     fi
-    if [[ -n "$LOG_FILE" ]]; then
-        SESSION_LOG="$LOG_FILE"
-    else
-        mkdir -p "$ANONBOX_LOG_DIR" 2>/dev/null || return 0
-        SESSION_LOG="${ANONBOX_LOG_DIR}/anonbox-$(date +%Y%m%d-%H%M%S).log"
-    fi
-    touch "$SESSION_LOG" 2>/dev/null || return 0
-    # shellcheck disable=SC2094
-    exec > >(tee -a "$SESSION_LOG") 2>&1
+    local prev_umask
+    prev_umask="$(umask)"
+    umask 077
+    SESSION_LOG="$(resolve_session_log_path "${LOG_FILE}")"
+    : >> "$SESSION_LOG" || { umask "$prev_umask"; SESSION_LOG=""; return 0; }
+    umask "$prev_umask"
     if (( QUIET == 0 && JSON_OUT == 0 )); then
         printf '         Session log: %s\n' "$SESSION_LOG"
     fi
+    log_append "=== anonbox v${VERSION} session start $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 }
 
 # =============================================================================
@@ -534,6 +743,7 @@ detect_network()
     else
         IFACE="enp0s1"
     fi
+    validate_iface "$IFACE"
 
     if command -v ip >/dev/null 2>&1; then
         LAN_SUBNET="$(ip -4 addr show dev "$IFACE" 2>/dev/null | awk '/inet / { print $2; exit }' || true)"
@@ -545,9 +755,12 @@ detect_network()
     if [[ -n "$LAN_SUBNET" ]]; then
         IFACE_IP="${LAN_SUBNET%%/*}"
         local prefix="${LAN_SUBNET##*/}"
+        if ! is_ipv4 "$IFACE_IP"; then
+            die "Primary IPv4 on ${IFACE} is not a valid address: ${IFACE_IP}"
+        fi
         # Correct network prefix (not ".0 with original mask" which breaks non-/24)
         if command -v python3 >/dev/null 2>&1; then
-            LAN_SUBNET="$(python3 -c "import ipaddress; print(ipaddress.ip_network('${IFACE_IP}/${prefix}', strict=False))" 2>/dev/null || echo "${IFACE_IP}/${prefix}")"
+            LAN_SUBNET="$(IFACE_CIDR="${IFACE_IP}/${prefix}" python3 -c 'import ipaddress,os; print(ipaddress.ip_network(os.environ["IFACE_CIDR"], strict=False))' 2>/dev/null || echo "${IFACE_IP}/${prefix}")"
         else
             LAN_SUBNET="${IFACE_IP}/${prefix}"
             info "Address/prefix on ${IFACE}: ${LAN_SUBNET} (install python3 for canonical network display)"
@@ -682,10 +895,10 @@ assert_torrc_safe_binds()
         die "Refusing torrc: TransPort 127.0.0.1:9040 is required."
     fi
     if [[ -n "$IFACE_IP" ]]; then
-        if ! grep -E "^[[:space:]]*TransPort[[:space:]]+${IFACE_IP}:9040" "$torrc_file" >/dev/null 2>&1; then
+        if ! grep -F "TransPort ${IFACE_IP}:9040" "$torrc_file" >/dev/null 2>&1; then
             die "Refusing torrc: TransPort ${IFACE_IP}:9040 is required for nft redirect."
         fi
-        if ! grep -E "^[[:space:]]*DNSPort[[:space:]]+${IFACE_IP}:5353" "$torrc_file" >/dev/null 2>&1; then
+        if ! grep -F "DNSPort ${IFACE_IP}:5353" "$torrc_file" >/dev/null 2>&1; then
             die "Refusing torrc: DNSPort ${IFACE_IP}:5353 is required for nft redirect."
         fi
     fi
@@ -807,7 +1020,7 @@ apply_apparmor_tor()
     backup_file "$APPARMOR_TOR_LOCAL"
 
     local tmp_aa
-    tmp_aa="$(mktemp)"
+    tmp_aa="$(anonbox_mktemp)"
     TMP_FILES+=("$tmp_aa")
     cat << 'EOF' > "$tmp_aa"
 # Site-specific additions for system_tor (anonbox)
@@ -842,7 +1055,7 @@ EOF
     fi
 
     local parser_err
-    parser_err="$(mktemp)"
+    parser_err="$(anonbox_mktemp)"
     TMP_FILES+=("$parser_err")
     if ! apparmor_parser -r "$profile" 2>"$parser_err"; then
         die "AppArmor parser failed for ${profile}: $(tr '\n' ' ' < "$parser_err")"
@@ -878,7 +1091,7 @@ assert_tor_listeners()
     if ! printf '%s\n' "$listen" | grep -q '127.0.0.1:9040'; then
         die "Tor TransPort must include 127.0.0.1:9040."
     fi
-    if [[ -n "$IFACE_IP" ]] && ! printf '%s\n' "$listen" | grep -q "${IFACE_IP}:9040"; then
+    if [[ -n "$IFACE_IP" ]] && ! ss_listens_tcp "$IFACE_IP" 9040; then
         die "Tor TransPort must also listen on ${IFACE_IP}:9040 (nft redirect target)."
     fi
 
@@ -892,7 +1105,7 @@ assert_tor_listeners()
     if ! printf '%s\n' "$listen" | grep -q '127.0.0.1:5353'; then
         die "Tor DNSPort must include 127.0.0.1:5353."
     fi
-    if [[ -n "$IFACE_IP" ]] && ! printf '%s\n' "$listen" | grep -q "${IFACE_IP}:5353"; then
+    if [[ -n "$IFACE_IP" ]] && ! ss_listens_udp "$IFACE_IP" 5353; then
         die "Tor DNSPort must also listen on ${IFACE_IP}:5353 (nft redirect target)."
     fi
 
@@ -1030,27 +1243,31 @@ storage_encrypted()
 
 restore_snapshot_files()
 {
+    # Contract: snap must already be jail-validated (resolve_snapshot_dir / find under BACKUP_DIR).
     local snap="$1"
     [[ -d "$snap" ]] || return 1
 
-    [[ -f "${snap}/torrc" ]] && cp "${snap}/torrc" "$TORRC" && ok "Restored $TORRC"
-    [[ -f "${snap}/nftables.conf" ]] && cp "${snap}/nftables.conf" "$NFTABLES_CONF" && ok "Restored $NFTABLES_CONF"
-    [[ -f "${snap}/resolv.conf" ]] && cp "${snap}/resolv.conf" "/etc/resolv.conf" && ok "Restored /etc/resolv.conf"
-    [[ -f "${snap}/fstab" ]] && cp "${snap}/fstab" "$FSTAB" && ok "Restored $FSTAB"
-    [[ -f "${snap}/grub" ]] && cp "${snap}/grub" "$GRUB_DEFAULT" && ok "Restored $GRUB_DEFAULT" && { command -v update-grub >/dev/null 2>&1 && update-grub || true; }
-    [[ -f "${snap}/login.defs" ]] && cp "${snap}/login.defs" "$LOGIN_DEFS" && ok "Restored $LOGIN_DEFS"
-    [[ -f "${snap}/common-session" ]] && cp "${snap}/common-session" "$PAM_COMMON_SESSION" && ok "Restored $PAM_COMMON_SESSION"
-    [[ -f "${snap}/su" ]] && cp "${snap}/su" "$PAM_SU" && ok "Restored $PAM_SU"
-    [[ -f "${snap}/hosts" ]] && cp "${snap}/hosts" "/etc/hosts" && ok "Restored /etc/hosts"
-    [[ -f "${snap}/99-tor-hardening.conf" ]] && cp "${snap}/99-tor-hardening.conf" "$SYSCTL_FILE" && ok "Restored $SYSCTL_FILE"
-    [[ -f "${snap}/98-anonbox-localnet.conf" ]] && cp "${snap}/98-anonbox-localnet.conf" "$LOCALNET_SYSCTL" && ok "Restored $LOCALNET_SYSCTL"
-    [[ -f "${snap}/override.conf" ]] && mkdir -p "$(dirname "$NFTABLES_OVERRIDE")" && cp "${snap}/override.conf" "$NFTABLES_OVERRIDE" && ok "Restored $NFTABLES_OVERRIDE"
-    [[ -f "${snap}/system_tor" ]] && mkdir -p /etc/apparmor.d/local && cp "${snap}/system_tor" "$APPARMOR_TOR_LOCAL" && ok "Restored $APPARMOR_TOR_LOCAL"
-    [[ -f "${snap}/00-mac-randomize.conf" ]] && mkdir -p /etc/NetworkManager/conf.d && cp "${snap}/00-mac-randomize.conf" "$NM_MAC_CONF" && ok "Restored $NM_MAC_CONF"
-    [[ -f "${snap}/no-dns.conf" ]] && mkdir -p /etc/NetworkManager/conf.d && cp "${snap}/no-dns.conf" "$NM_DNS_CONF" && ok "Restored $NM_DNS_CONF"
-    [[ -f "${snap}/20-connectivity.conf" ]] && mkdir -p /etc/NetworkManager/conf.d && cp "${snap}/20-connectivity.conf" "$NM_CONN_CONF" && ok "Restored $NM_CONN_CONF"
-    [[ -f "${snap}/machine-id" ]] && cp "${snap}/machine-id" /etc/machine-id && ok "Restored /etc/machine-id"
-    [[ -f "${snap}/coredump.conf" ]] && cp "${snap}/coredump.conf" "$SYSTEMD_COREDUMP" && ok "Restored $SYSTEMD_COREDUMP"
+    restore_one "${snap}/torrc" "$TORRC"
+    restore_one "${snap}/nftables.conf" "$NFTABLES_CONF"
+    restore_one "${snap}/resolv.conf" "/etc/resolv.conf"
+    restore_one "${snap}/fstab" "$FSTAB"
+    if [[ -f "${snap}/grub" ]]; then
+        restore_one "${snap}/grub" "$GRUB_DEFAULT"
+        command -v update-grub >/dev/null 2>&1 && update-grub || true
+    fi
+    restore_one "${snap}/login.defs" "$LOGIN_DEFS"
+    restore_one "${snap}/common-session" "$PAM_COMMON_SESSION"
+    restore_one "${snap}/su" "$PAM_SU"
+    restore_one "${snap}/hosts" "/etc/hosts"
+    restore_one "${snap}/99-tor-hardening.conf" "$SYSCTL_FILE"
+    restore_one "${snap}/98-anonbox-localnet.conf" "$LOCALNET_SYSCTL"
+    restore_one "${snap}/override.conf" "$NFTABLES_OVERRIDE"
+    restore_one "${snap}/system_tor" "$APPARMOR_TOR_LOCAL"
+    restore_one "${snap}/00-mac-randomize.conf" "$NM_MAC_CONF"
+    restore_one "${snap}/no-dns.conf" "$NM_DNS_CONF"
+    restore_one "${snap}/20-connectivity.conf" "$NM_CONN_CONF"
+    restore_one "${snap}/machine-id" /etc/machine-id
+    restore_one "${snap}/coredump.conf" "$SYSTEMD_COREDUMP"
     return 0
 }
 
@@ -1140,11 +1357,11 @@ cmd_setup()
     vinfo "Pluggable Transport Binary: $pt_binary"
 
     local tmp_torrc
-    tmp_torrc="$(mktemp)"
+    tmp_torrc="$(anonbox_mktemp)"
     TMP_FILES+=("$tmp_torrc")
 
-    if [[ -z "$IFACE_IP" ]]; then
-        die "Could not detect IPv4 address on ${IFACE}. Transparent redirect needs TransPort on the NIC IP (not 0.0.0.0)."
+    if [[ -z "$IFACE_IP" ]] || ! is_ipv4 "$IFACE_IP"; then
+        die "Could not detect a valid IPv4 address on ${IFACE}. Transparent redirect needs TransPort on the NIC IP (not 0.0.0.0)."
     fi
 
     cat << EOF > "$tmp_torrc"
@@ -1198,12 +1415,8 @@ EOF
     fi
 
     if [[ -n "$BRIDGES_FILE" ]]; then
-        if [[ ! -f "$BRIDGES_FILE" ]]; then
-            die "Specified bridges file does not exist: $BRIDGES_FILE"
-        fi
         info "Injecting obfs4/transport bridges from $BRIDGES_FILE"
-        printf '\n# --- Injected Bridges ---\nUseBridges 1\n' >> "$tmp_torrc"
-        grep -vE '^\s*(#|$)' "$BRIDGES_FILE" >> "$tmp_torrc" || true
+        append_bridges_from_file "$BRIDGES_FILE" "$tmp_torrc"
     elif (( NO_BRIDGES == 1 )); then
         vinfo "Direct connection specified (--no-bridges); existing Bridge lines will not be preserved"
     else
@@ -1254,7 +1467,7 @@ EOF
     backup_file "$NFTABLES_CONF"
 
     local tmp_nft
-    tmp_nft="$(mktemp)"
+    tmp_nft="$(anonbox_mktemp)"
     TMP_FILES+=("$tmp_nft")
 
     local ssh_input_rules=""
@@ -1397,8 +1610,11 @@ EOF
 
     # 8. Enable nftables and start Tor (fail-hard)
     step "8. Enabling nftables and starting Tor"
+    # Live rules already loaded via single nft -f above; avoid restart (empty window).
     run systemctl enable nftables.service 2>/dev/null || true
-    run systemctl restart nftables.service 2>/dev/null || true
+    if ! systemctl is-active --quiet nftables.service 2>/dev/null; then
+        run systemctl start nftables.service 2>/dev/null || true
+    fi
     assert_nft_tables_loaded
     ok "nftables firewall service enabled and running"
 
@@ -1885,7 +2101,7 @@ cmd_check()
         elif ! printf '%s\n' "$listen" | grep -q '127.0.0.1:9040'; then
             fail_fix "TransPort missing 127.0.0.1:9040" \
                 "sudo ./anonbox setup" "listeners" "leak"
-        elif ! printf '%s\n' "$listen" | grep -q "${IFACE_IP}:9040"; then
+        elif ! ss_listens_tcp "$IFACE_IP" 9040; then
             fail_fix "TransPort missing ${IFACE_IP}:9040 (nft redirect target)" \
                 "sudo ./anonbox setup" "listeners" "leak"
         else
@@ -1916,7 +2132,7 @@ cmd_check()
         elif ! printf '%s\n' "$listen" | grep -q '127.0.0.1:5353'; then
             fail_fix "DNSPort missing 127.0.0.1:5353" \
                 "sudo ./anonbox setup" "listeners" "leak"
-        elif ! printf '%s\n' "$listen" | grep -q "${IFACE_IP}:5353"; then
+        elif ! ss_listens_udp "$IFACE_IP" 5353; then
             fail_fix "DNSPort missing ${IFACE_IP}:5353 (nft redirect target)" \
                 "sudo ./anonbox setup" "listeners" "leak"
         else
@@ -1933,10 +2149,21 @@ cmd_check()
     fi
 
     section "2" "Testing SOCKS5 Proxy (127.0.0.1:9050)"
-    local socks_ip
+    local socks_ip api_out
     socks_ip=""
     for _socks_try in 1 2 3; do
-        socks_ip="$(curl -s --socks5-hostname 127.0.0.1:9050 --max-time 20 https://check.torproject.org/api/ip 2>/dev/null | grep -o '"IP":"[^"]*' | cut -d'"' -f4 || echo '')"
+        api_out="$(curl -fsS --socks5-hostname 127.0.0.1:9050 --max-time 20 https://check.torproject.org/api/ip 2>/dev/null || true)"
+        if [[ -n "$api_out" ]]; then
+            if command -v python3 >/dev/null 2>&1; then
+                socks_ip="$(printf '%s' "$api_out" | python3 -c 'import json,sys
+try:
+ d=json.load(sys.stdin); print(d.get("IP") or "")
+except Exception:
+ print("")' 2>/dev/null || true)"
+            else
+                socks_ip="$(printf '%s' "$api_out" | grep -o '"IP":"[^"]*' | cut -d'"' -f4 || true)"
+            fi
+        fi
         [[ -n "$socks_ip" ]] && break
         sleep 2
     done
@@ -1950,8 +2177,20 @@ cmd_check()
 
     section "3" "Testing Transparent TCP Proxying"
     local trans_ip is_tor
-    trans_ip="$(curl -s --max-time 15 https://check.torproject.org/api/ip 2>/dev/null | grep -o '"IP":"[^"]*' | cut -d'"' -f4 || echo '')"
-    is_tor="$(curl -s --max-time 15 https://check.torproject.org/api/ip 2>/dev/null | grep -o '"IsTor":[^,}]*' | cut -d':' -f2 || echo '')"
+    trans_ip=""
+    is_tor=""
+    api_out="$(curl -fsS --max-time 15 https://check.torproject.org/api/ip 2>/dev/null || true)"
+    if [[ -n "$api_out" ]] && command -v python3 >/dev/null 2>&1; then
+        read -r trans_ip is_tor < <(printf '%s' "$api_out" | python3 -c 'import json,sys
+try:
+ d=json.load(sys.stdin)
+ print((d.get("IP") or "").replace(" ","")+" "+("true" if d.get("IsTor") is True else ("false" if d.get("IsTor") is False else "")))
+except Exception:
+ print(" ")' 2>/dev/null || echo " ")
+    elif [[ -n "$api_out" ]]; then
+        trans_ip="$(printf '%s' "$api_out" | grep -o '"IP":"[^"]*' | cut -d'"' -f4 || true)"
+        is_tor="$(printf '%s' "$api_out" | grep -o '"IsTor":[^,}]*' | cut -d':' -f2 | tr -d ' ' || true)"
+    fi
     if [[ "$is_tor" == "true" ]]; then
         pass "Transparent Proxying confirmed (IsTor=true, Exit IP: $trans_ip)"
     else
@@ -2234,11 +2473,31 @@ cmd_check()
     elif (( tor_active == 1 )); then
         systemctl stop tor@default.service >/dev/null 2>&1 || true
         sleep 1
-        if curl -s --max-time 5 https://check.torproject.org/api/ip >/dev/null 2>&1; then
-            fail_fix "CRITICAL: curl succeeded while Tor was stopped (kill-switch failed)" \
-                "Do not browse; re-run: sudo ./anonbox setup" "kill-switch" "leak"
+        if systemctl is-active --quiet tor@default.service 2>/dev/null; then
+            fail_fix "Kill-switch inconclusive: tor@default still active after stop" \
+                "systemctl status tor@default; sudo ./anonbox setup" "kill-switch" "leak"
         else
-            pass "Kill-switch: TCP/HTTPS produced no response while Tor is down"
+            local ks_tables
+            ks_tables="$(nft list tables 2>/dev/null || true)"
+            if [[ "$ks_tables" != *"tor_nat"* || "$ks_tables" != *"tor_filter"* ]]; then
+                fail_fix "Kill-switch cannot be verified: tor_nat/tor_filter not loaded" \
+                    "sudo ./anonbox setup" "kill-switch" "leak"
+            else
+                local ks_code=0 ks_http=""
+                ks_http="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 https://check.torproject.org/api/ip 2>/dev/null)" || ks_code=$?
+                if (( ks_code == 0 )) && [[ -n "$ks_http" && "$ks_http" != "000" ]]; then
+                    fail_fix "CRITICAL: curl succeeded while Tor was stopped (kill-switch failed; HTTP ${ks_http})" \
+                        "Do not browse; re-run: sudo ./anonbox setup" "kill-switch" "leak"
+                elif (( ks_code == 28 || ks_code == 7 || ks_code == 6 || ks_code == 52 || ks_code == 56 )); then
+                    pass "Kill-switch: curl failed as expected while Tor down (exit ${ks_code}; Tor inactive; nft tor_* present)"
+                elif (( ks_code == 0 )); then
+                    fail_fix "CRITICAL: curl exit 0 while Tor was stopped (kill-switch failed)" \
+                        "Do not browse; re-run: sudo ./anonbox setup" "kill-switch" "leak"
+                else
+                    fail_fix "Kill-switch inconclusive: curl exit ${ks_code} (not a classified drop)" \
+                        "Re-run check; verify nftables; sudo ./anonbox setup" "kill-switch" "leak"
+                fi
+            fi
         fi
         systemctl start tor@default.service >/dev/null 2>&1 || true
         info "Waiting for Tor to recover after kill-switch test..."
@@ -2512,10 +2771,7 @@ cmd_rollback()
 
     local selected=""
     if [[ -n "$ROLLBACK_SNAPSHOT" ]]; then
-        selected="${BACKUP_DIR}/${ROLLBACK_SNAPSHOT}"
-        if [[ ! -d "$selected" ]]; then
-            die "Snapshot not found: $ROLLBACK_SNAPSHOT (expected directory $selected)"
-        fi
+        selected="$(resolve_snapshot_dir "$ROLLBACK_SNAPSHOT")"
     elif [[ -t 0 ]]; then
         local sel
         printf 'Select snapshot number [1-%d]: ' "${#backups[@]}"
@@ -2524,6 +2780,8 @@ cmd_rollback()
             die "Invalid snapshot selection"
         fi
         selected="${backups[$((sel - 1))]}"
+        # Ensure interactive pick stays under BACKUP_DIR
+        selected="$(resolve_under_dir "$BACKUP_DIR" "$selected")"
     else
         die "Non-interactive rollback requires --snapshot ID (directory name under $BACKUP_DIR)"
     fi
@@ -2533,8 +2791,15 @@ cmd_rollback()
     restore_snapshot_files "$clean_latest"
 
     if [[ -f "$NFTABLES_CONF" ]]; then
-        nft -f "$NFTABLES_CONF" 2>/dev/null || true
-        systemctl restart nftables 2>/dev/null || true
+        if nft -c -f "$NFTABLES_CONF" >/dev/null 2>&1; then
+            nft -f "$NFTABLES_CONF" 2>/dev/null || true
+            systemctl enable nftables 2>/dev/null || true
+            if ! systemctl is-active --quiet nftables 2>/dev/null; then
+                systemctl start nftables 2>/dev/null || true
+            fi
+        else
+            warn "Restored nftables.conf failed nft -c; not loading"
+        fi
     fi
     sysctl --system 2>/dev/null || true
     local aa_profile
@@ -2553,7 +2818,7 @@ cmd_rollback()
 cmd_uninstall()
 {
     require_root
-    confirm_or_die "Confirm uninstall (type 'uninstall' to restore clearnet from first snapshot)" "uninstall"
+    confirm_or_die "Confirm uninstall (type 'uninstall' to restore clearnet + baseline nftables accept policy)" "uninstall"
     step "Uninstalling anonbox Configuration (Restoring standard networking)"
     detect_network
 
@@ -2561,19 +2826,23 @@ cmd_uninstall()
     if [[ -d "$BACKUP_DIR" ]]; then
         mapfile -t backups < <(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort || true)
     fi
-    if [[ ${#backups[@]} -gt 0 ]]; then
-        local snap="${backups[0]}"
-        info "Restoring original files from first snapshot $(basename "$snap")"
+    local snap="" b
+    for b in "${backups[@]+"${backups[@]}"}"; do
+        if [[ -f "${b}/nftables.conf" && -f "${b}/torrc" ]]; then
+            snap="$b"
+            break
+        fi
+    done
+    if [[ -n "$snap" ]]; then
+        info "Restoring files from oldest complete snapshot $(basename "$snap") (nftables.conf+torrc)"
         restore_snapshot_files "$snap"
     else
-        warn "No snapshots in $BACKUP_DIR; removing anonbox units and flushing firewall only"
+        warn "No complete snapshot (nftables.conf+torrc) in $BACKUP_DIR; installing baseline accept policy"
     fi
 
-    if command -v nft >/dev/null 2>&1; then
-        run nft flush ruleset 2>/dev/null || true
-        run systemctl disable --now nftables 2>/dev/null || true
-        ok "nftables firewall rules flushed and disabled"
-    fi
+    # End-state: clearnet with a loaded baseline accept policy (never flush+disable only).
+    install_baseline_nftables_accept
+    ok "Baseline nftables accept policy loaded and nftables enabled"
 
     run systemctl disable --now tor@default 2>/dev/null || true
     ok "Tor service stopped (will not restart with TransPort and no kill-switch)"
@@ -2617,7 +2886,58 @@ cmd_uninstall()
         apparmor_parser -r "$aa_profile" 2>/dev/null || true
     fi
 
-    ok "anonbox uninstalled. Standard clearnet networking restored from first snapshot (if present)."
+    ok "anonbox uninstalled. Clearnet routing restored with baseline nftables accept policy (not an empty ruleset)."
+}
+
+install_baseline_nftables_accept()
+{
+    local conf="$NFTABLES_CONF"
+    if [[ -f "$conf" ]] && nft -c -f "$conf" >/dev/null 2>&1; then
+        # Prefer restored/non-tor policy if it validates; strip is caller's responsibility.
+        # If restored conf still has tor_* tables, replace with accept baseline.
+        if grep -q 'tor_nat\|tor_filter\|tor_block' "$conf" 2>/dev/null; then
+            vinfo "Restored nftables.conf still contains anonbox tables; writing accept baseline"
+        else
+            run nft -f "$conf"
+            run systemctl enable nftables.service 2>/dev/null || true
+            if ! systemctl is-active --quiet nftables.service 2>/dev/null; then
+                run systemctl start nftables.service 2>/dev/null || true
+            fi
+            return 0
+        fi
+    fi
+
+    local tmp_base
+    tmp_base="$(anonbox_mktemp)"
+    TMP_FILES+=("$tmp_base")
+    cat << 'EOF' > "$tmp_base"
+#!/usr/sbin/nft -f
+# anonbox uninstall baseline — Debian-style accept (clearnet; not fail-closed Tor)
+flush ruleset
+table inet filter {
+    chain input {
+        type filter hook input priority filter; policy accept;
+    }
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+    }
+    chain output {
+        type filter hook output priority filter; policy accept;
+    }
+}
+EOF
+    if ! nft -c -f "$tmp_base" >/dev/null 2>&1; then
+        rm -f "$tmp_base"
+        die "Failed to validate baseline accept nftables policy"
+    fi
+    run cp "$tmp_base" "$conf"
+    run rm -f "$tmp_base"
+    run chmod 700 "$conf"
+    run nft -f "$conf"
+    run systemctl enable nftables.service 2>/dev/null || true
+    if ! systemctl is-active --quiet nftables.service 2>/dev/null; then
+        run systemctl start nftables.service 2>/dev/null || true
+    fi
 }
 
 # =============================================================================
@@ -2641,7 +2961,7 @@ Commands:
   all         Execute full pipeline: setup -> harden -> check
   status      Show current Tor connection health, circuits, and public exit IP
   rollback    Restore a snapshot from /var/backups/anonbox/ (--snapshot ID or interactive)
-  uninstall   Restore the first/oldest snapshot, flush firewall, and restore clearnet
+  uninstall   Restore clearnet with baseline nftables accept policy (not an empty ruleset)
   version     Display version information
   help        Show this help message
 
@@ -2653,15 +2973,15 @@ Global options:
   --quiet, -q           Suppress step output; print summary (and Next steps) only
   --json                Machine-readable report (check, doctor, status)
   --no-color            Disable ANSI colors (also respects NO_COLOR=1)
-  --log-file PATH       Session log path (default under /var/log/anonbox/ when root)
+  --log-file NAME       Session log basename under /var/log/anonbox/ only (no absolute paths)
   --no-log              Disable session logging
 
 Command-specific options:
-  --bridges-file FILE   setup/all: path to Bridge lines
+  --bridges-file FILE   setup/all: path to Bridge lines (allowlist: Bridge only; no symlinks)
   --no-bridges          setup/all: configure Tor without bridges
   --allow-ssh           setup/all: allow inbound SSH from RFC1918
   --no-kill-switch      check: skip Tor-down leak test (not for release gate)
-  --snapshot ID         rollback: snapshot directory under /var/backups/anonbox/
+  --snapshot ID         rollback: YYYYMMDD_HHMMSS or YYYYMMDD_HHMMSS_PID under /var/backups/anonbox/
 
 Exit codes (check/doctor/all):
   0  SAFE
@@ -2737,20 +3057,22 @@ Usage: ./anonbox status [options]
 Options: --json | --iface IFACE | --verbose | --quiet | --no-color
 EOF
             ;;
+        uninstall)
+            cat << EOF
+anonbox uninstall — Restore clearnet with baseline nftables accept policy
+
+Usage: sudo ./anonbox uninstall [--yes]
+Confirmation required: type 'uninstall' (or pass --yes).
+End-state: nftables loaded with accept baseline (never flush-only empty ruleset).
+EOF
+            ;;
         rollback)
             cat << EOF
 anonbox rollback — Restore a configuration snapshot
 
 Usage: sudo ./anonbox rollback [--snapshot ID] [--yes]
+Snapshot ID: YYYYMMDD_HHMMSS or YYYYMMDD_HHMMSS_PID (jail under /var/backups/anonbox/).
 Interactive selection when TTY and no --snapshot.
-EOF
-            ;;
-        uninstall)
-            cat << EOF
-anonbox uninstall — Restore clearnet from first/oldest snapshot
-
-Usage: sudo ./anonbox uninstall [--yes]
-Confirmation required: type 'uninstall' (or pass --yes).
 EOF
             ;;
         *)

@@ -28,7 +28,7 @@ grep -q 'torrc_transport_nic_ip' ./anonbox || fail "torrc_transport_nic_ip helpe
 grep -q 'warn_iface_ip_drift' ./anonbox || fail "warn_iface_ip_drift helper missing"
 grep -q 'IFACE_IP drift' ./anonbox || fail "IFACE_IP drift FAIL in check missing"
 grep -q 'Preserving existing Bridge lines' ./anonbox || fail "bridge preserve on re-setup missing"
-grep -q 'first/oldest snapshot' ./anonbox || fail "uninstall help must say first/oldest snapshot"
+grep -q 'baseline nftables accept' ./anonbox || fail "uninstall help must mention baseline nftables accept"
 # shellcheck disable=SC2016 # intentional literal "$ANONBOX_TOR_DEFAULTS" in source
 grep -q 'rm -f "$ANONBOX_TOR_DEFAULTS"' ./anonbox || fail "uninstall must remove anonbox-defaults-torrc"
 # Dead ssh_output_extra must stay gone
@@ -67,6 +67,29 @@ grep -q 'Exit code: %d (0=SAFE, 1=leak/network, 2=hardening/storage)' ./anonbox 
 grep -q '\[PHASE' ./anonbox || fail "PHASE banners missing (English UI)"
 [[ -f ./completions/anonbox.bash ]] || fail "completions/anonbox.bash missing"
 pass "CLI UX asserts"
+
+# Audit remediation helpers (path jail, bridges allowlist, kill-switch, restore)
+grep -q 'resolve_under_dir' ./anonbox || fail "resolve_under_dir missing"
+grep -q 'resolve_snapshot_dir' ./anonbox || fail "resolve_snapshot_dir missing"
+grep -q 'append_bridges_from_file' ./anonbox || fail "append_bridges_from_file missing"
+grep -q "only 'Bridge" ./anonbox || fail "bridges allowlist die missing"
+grep -q 'restore_one' ./anonbox || fail "restore_one missing"
+grep -q 'install_baseline_nftables_accept' ./anonbox || fail "install_baseline_nftables_accept missing"
+grep -q 'log_append' ./anonbox || fail "log_append missing"
+grep -q 'anonbox_mktemp' ./anonbox || fail "anonbox_mktemp missing"
+grep -q 'ss_listens_tcp' ./anonbox || fail "ss_listens_tcp missing"
+grep -q 'CURRENT_SNAPSHOT_ID=.*_\$\$' ./anonbox || fail "snapshot ID must include PID"
+if grep -q 'exec > >(tee' ./anonbox; then
+  fail "exec tee session logging must remain removed"
+fi
+if grep -q 'nft flush ruleset 2>/dev/null || true' ./anonbox && grep -q 'disable --now nftables' ./anonbox; then
+  # uninstall must not use flush+disable as sole end-state; baseline helper required
+  grep -q 'install_baseline_nftables_accept' ./anonbox || fail "uninstall flush without baseline helper"
+fi
+grep -q 'classified drop\|curl exit' ./anonbox || fail "kill-switch curl exit classification missing"
+grep -q 'Tor inactive; nft tor_' ./anonbox || true
+grep -q 'ks_code == 28' ./anonbox || fail "kill-switch classified curl exits missing"
+pass "audit remediation asserts"
 
 # Per-command help
 ./anonbox check --help 2>&1 | grep -q 'no-kill-switch' || fail "check --help missing --no-kill-switch"

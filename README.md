@@ -132,14 +132,16 @@ sudo ./anonbox doctor
 # Show current Tor connection health, circuits, and public exit IP
 ./anonbox status
 
-# Rollback configuration to a chosen snapshot
+# Rollback configuration to a chosen snapshot (ID: YYYYMMDD_HHMMSS[_PID])
 sudo ./anonbox rollback --snapshot 20260824_120000 --yes
 
-# Uninstall anonbox (restore first snapshot + flush firewall)
+# Uninstall anonbox (baseline nftables accept policy; not an empty flush)
 sudo ./anonbox uninstall --yes
 ```
 
 **Exit codes** (`check` / `doctor` / `all`): `0` SAFE, `1` leak/network/Tor failure, `2` hardening/storage only.
+
+**Session log:** basename only under `/var/log/anonbox/` (`--log-file NAME`). Absolute paths rejected.
 
 **Bash completion:** `source completions/anonbox.bash` (zsh: `autoload bashcompinit; bashcompinit` then source).
 

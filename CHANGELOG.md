@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Path jail for `--snapshot` (`resolve_snapshot_dir` / `resolve_under_dir`); reject `..` and symlinks.
+- `--log-file` accepts basename under `/var/log/anonbox/` only; session logging via `log_append` (no `exec > >(tee)`).
+- `--bridges-file` allowlists `Bridge` lines only (`append_bridges_from_file`); rejects other directives and symlinks.
+- Kill-switch requires Tor inactive + live `tor_*` nft tables + classified curl failure (exit 6/7/28/52/56); HTTP success while Tor down is FAIL; inconclusive exits are FAIL (not silent PASS).
+- `uninstall` ends with loaded baseline accept nftables (or validated restored non-tor conf); never flush+disable as sole end-state.
+- Validate `--iface` / primary IPv4; pass CIDR to Python via env; literal `grep -F` / `ss_listens_*` for bind checks.
+- Transparent proxy does not replace Tor Browser; setup prints that warning.
+- Documented residuals: bootstrap clearnet apt/git, NIC TransPort binds, NAT MAC, IFACE_IP drift until re-setup.
+
 ### Added
 
 - CLI remediations: `fail_fix` prints actionable `Fix:` lines; audit summary lists **Next steps** and honest UNSAFE reasons.
@@ -23,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `check` FAILs on IFACE_IP drift (live primary IPv4 ≠ TransPort NIC bind in torrc/`ss`) and when primary IPv4 is missing during transparent-path checks; `setup`/`harden`/`status` warn to re-run setup after IP change.
 - `check` asserts `/etc/tor/anonbox-defaults-torrc` exists and `tor@default` ExecStart uses `--defaults-torrc` pointing at it.
-- `uninstall` removes anonbox Tor defaults + `tor@default` drop-in (and empty drop-in dir) with `daemon-reload`; help text matches first/oldest snapshot restore (`backups[0]`).
+- `uninstall` removes anonbox Tor defaults + `tor@default` drop-in (and empty drop-in dir) with `daemon-reload`; restores oldest complete snapshot then loads baseline accept nftables (not flush-only).
 - Re-setup without `--bridges-file`/`--no-bridges` preserves existing `Bridge` lines from current torrc.
 - Strong WARN when SSH env is present but `--allow-ssh` is not set during setup (lockout on reboot).
 - Dynamic `User ${TOR_USER}` in anonbox-defaults; removed unused `ssh_output_extra`; clarified SocksPort comments for anonbox-defaults approach.
@@ -48,11 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Touched-files manifest at `/var/lib/anonbox/touched-files.manifest`.
 - Inbound RFC1918 SSH/ICMP closed by default; `--allow-ssh` for lab. `userns_clone` left enabled for Tor Browser sandbox.
 - CI: pinned Actions SHAs; smoke job (`scripts/ci-smoke.sh`); `scripts/acceptance-matrix.sh` for release gate.
-
-### Security
-
-- Transparent proxy does not replace Tor Browser; setup prints that warning.
-- Documented residuals: bootstrap clearnet apt/git, NIC TransPort binds, NAT MAC, IFACE_IP drift until re-setup.
 
 ## [1.0.0] - 2026-08-23
 

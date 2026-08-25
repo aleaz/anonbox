@@ -48,7 +48,7 @@
 
 ## 3. Acceptance Verification Matrix
 
-Release gate: prefer `sudo ./anonbox check` (without `--no-kill-switch`). **SAFE** means `FAIL_COUNT == 0`, Tor active, and encrypted storage (LUKS/eCryptfs). Exit codes: `0` SAFE, `1` leak/network, `2` hardening/storage only. Individual matrix rows below are the in-scope verification targets; lab hosts may WARN or FAIL storage by design without blocking setup. Use `sudo ./anonbox doctor` for read-only triage (no kill-switch).
+Release gate: prefer `sudo ./anonbox check` (without `--no-kill-switch`). **SAFE** means `FAIL_COUNT == 0`, Tor active, and encrypted storage (LUKS/eCryptfs). Exit codes: `0` SAFE, `1` leak/network, `2` hardening/storage only. Individual matrix rows below are the in-scope verification targets; lab hosts may WARN or FAIL storage by design without blocking setup. Use `sudo ./anonbox doctor` for read-only triage (no kill-switch). `uninstall` restores clearnet with a **loaded baseline accept nftables policy** (never an empty flush-only end-state).
 
 | # | Verification Check | Command | Expected Result |
 | :--- | :--- | :--- | :--- |
@@ -58,7 +58,7 @@ Release gate: prefer `sudo ./anonbox check` (without `--no-kill-switch`). **SAFE
 | **04** | UDP Leak Prevention | `dig @8.8.8.8 -p 5353 google.com` | **Timeout / Drop** (non-53 UDP blocked; do not use `nc -uz`) |
 | **05** | ICMP Leak Prevention | `ping -c 2 -W 2 1.1.1.1` | **100% packet loss** |
 | **06** | IPv6 Leak Prevention | `curl -6 https://icanhazip.com` | **Immediate network failure** |
-| **07** | Kill-Switch on Crash | Stop `tor` (`systemctl stop tor`) & run `curl` | **Connection refused / 0 bytes leaked** |
+| **07** | Kill-Switch on Crash | Stop `tor` (`systemctl stop tor`) & run `curl` | Tor **inactive**; `tor_nat`/`tor_filter` still loaded; curl must **not** succeed (classified fail: timeout/connect/DNS). HTTP success while Tor down = **FAIL**. Inconclusive curl exits = **FAIL** (not PASS). |
 | **08** | Stream Isolation | `curl` to 2 distinct endpoints simultaneously | **Different exit IPs returned** |
 | **09** | Timezone Check | `date +%Z` | Returns `UTC` |
 | **10** | Storage Encryption Check | `findmnt -t ecryptfs` / `lsblk -f` | Active `ecryptfs` mount or `crypto_LUKS` (**FAIL** if missing; blocks SAFE) |
