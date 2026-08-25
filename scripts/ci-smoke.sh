@@ -15,6 +15,7 @@ pass "bash -n anonbox"
 # Torrc fragment must neutralize Debian defaults and forbid 0.0.0.0 binds
 grep -q 'anonbox-defaults-torrc' ./anonbox || fail "anonbox-defaults-torrc missing from generator"
 grep -q 'SocksPort 127.0.0.1:9050' ./anonbox || fail "localhost SocksPort missing"
+# shellcheck disable=SC2016 # intentional literal ${TOR_USER} in source
 grep -q 'User ${TOR_USER}' ./anonbox || fail "dynamic User \${TOR_USER} missing from anonbox-defaults"
 # Generator must not emit bare SocksPort 0 lines (incompatible with nonzero SocksPort)
 if grep -E '^\s*SocksPort 0\s*$' ./anonbox >/dev/null 2>&1; then
@@ -28,6 +29,7 @@ grep -q 'warn_iface_ip_drift' ./anonbox || fail "warn_iface_ip_drift helper miss
 grep -q 'IFACE_IP drift' ./anonbox || fail "IFACE_IP drift FAIL in check missing"
 grep -q 'Preserving existing Bridge lines' ./anonbox || fail "bridge preserve on re-setup missing"
 grep -q 'first/oldest snapshot' ./anonbox || fail "uninstall help must say first/oldest snapshot"
+# shellcheck disable=SC2016 # intentional literal "$ANONBOX_TOR_DEFAULTS" in source
 grep -q 'rm -f "$ANONBOX_TOR_DEFAULTS"' ./anonbox || fail "uninstall must remove anonbox-defaults-torrc"
 # Dead ssh_output_extra must stay gone
 if grep -q 'ssh_output_extra' ./anonbox; then
@@ -43,12 +45,32 @@ grep -q 'fib daddr type local accept' ./anonbox || fail "fib daddr type local ac
 pass "nftables template asserts"
 
 # Dry-run should not require root
-./anonbox setup --dry-run --no-bridges >/tmp/anonbox-dry.out 2>&1 || true
+./anonbox setup --dry-run --no-bridges --yes >/tmp/anonbox-dry.out 2>&1 || true
 if grep -qi 'ERROR' /tmp/anonbox-dry.out && ! grep -q 'DRY-RUN' /tmp/anonbox-dry.out; then
   # dry-run may still die on OS detection outside Debian — accept that
   pass "dry-run invoked (non-Debian hosts may abort after OS check)"
 else
   pass "dry-run completed or reported dry-run markers"
 fi
+
+# CLI UX Stage 1–3 helpers
+grep -q 'fail_fix' ./anonbox || fail "fail_fix helper missing"
+grep -q 'Next steps:' ./anonbox || fail "Next steps summary missing"
+grep -q 'apparmor-applied.at' ./anonbox || fail "apparmor-applied.at marker missing"
+grep -q 'record_apparmor_applied' ./anonbox || fail "record_apparmor_applied missing"
+grep -q 'cmd_doctor' ./anonbox || fail "doctor subcommand missing"
+grep -q 'NO_KILL_SWITCH' ./anonbox || fail "--no-kill-switch support missing"
+grep -q 'ASSUME_YES' ./anonbox || fail "--yes support missing"
+grep -q 'JSON_OUT' ./anonbox || fail "--json support missing"
+grep -q 'print_audit_summary' ./anonbox || fail "print_audit_summary missing"
+grep -q 'Exit code: %d (0=SAFE, 1=leak/network, 2=hardening/storage)' ./anonbox || fail "exit code legend missing"
+grep -q '\[PHASE' ./anonbox || fail "PHASE banners missing (English UI)"
+[[ -f ./completions/anonbox.bash ]] || fail "completions/anonbox.bash missing"
+pass "CLI UX asserts"
+
+# Per-command help
+./anonbox check --help 2>&1 | grep -q 'no-kill-switch' || fail "check --help missing --no-kill-switch"
+./anonbox doctor --help 2>&1 | grep -q 'doctor' || fail "doctor --help broken"
+pass "per-command help"
 
 printf '\nAll CI smoke checks passed.\n'

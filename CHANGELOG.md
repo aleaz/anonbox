@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- CLI remediations: `fail_fix` prints actionable `Fix:` lines; audit summary lists **Next steps** and honest UNSAFE reasons.
+- Exit codes for `check`/`doctor`/`all`: `0` SAFE, `1` leak/network/Tor, `2` hardening/storage only.
+- AppArmor apply marker `/var/lib/anonbox/apparmor-applied.at`; `check` FAILs only on DENIED after marker (stale boot denials → WARN).
+- `doctor` read-only diagnostics (no kill-switch); `check --no-kill-switch` for frequent audits (release gate still requires full check).
+- Preflight on `setup`/`all`: bridges validation, SSH lockout prompt, swap/LUKS warnings; `--yes`/`-y` skips prompts.
+- Destructive confirmations for `uninstall`/`rollback` (type `uninstall`/`yes`, or `--yes`).
+- Output flags: `--quiet`/`-q`, `--json` (check/doctor/status), `--no-color` / `NO_COLOR`, session log under `/var/log/anonbox/` (`--log-file` / `--no-log`).
+- Per-command help (`anonbox check --help`); bash completion in `completions/anonbox.bash`.
+- Stream isolation test retries; clearer transient WARN when SOCKS already passed.
+
 ### Fixed
 
 - `check` FAILs on IFACE_IP drift (live primary IPv4 ≠ TransPort NIC bind in torrc/`ss`) and when primary IPv4 is missing during transparent-path checks; `setup`/`harden`/`status` warn to re-run setup after IP change.
@@ -45,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.0] - 2026-08-23
 
 > **Note:** Some 1.0.0 changelog claims are superseded by later work (keep for history). In particular: TransPort/`DNSPort` on `0.0.0.0` was reverted (bind conflict); `kernel.unprivileged_userns_clone=0` was undone for Tor Browser sandbox; AppArmor PT binary whitelist in `local/system_tor` was replaced (conflicts with Debian `x` modifiers); blanket RFC1918 SSH/ICMP accept is no longer default.
+
 ### Added
 
 - Unified standalone CLI entrypoint (`anonbox`) supporting `setup`, `harden`, `check`, `all`, `status`, `rollback`, and `uninstall`.

@@ -48,7 +48,7 @@
 
 ## 3. Acceptance Verification Matrix
 
-Release gate: prefer `sudo ./anonbox check`. **SAFE** means `FAIL_COUNT == 0`, Tor active, and encrypted storage (LUKS/eCryptfs). Individual matrix rows below are the in-scope verification targets; lab hosts may WARN or FAIL storage by design without blocking setup.
+Release gate: prefer `sudo ./anonbox check` (without `--no-kill-switch`). **SAFE** means `FAIL_COUNT == 0`, Tor active, and encrypted storage (LUKS/eCryptfs). Exit codes: `0` SAFE, `1` leak/network, `2` hardening/storage only. Individual matrix rows below are the in-scope verification targets; lab hosts may WARN or FAIL storage by design without blocking setup. Use `sudo ./anonbox doctor` for read-only triage (no kill-switch).
 
 | # | Verification Check | Command | Expected Result |
 | :--- | :--- | :--- | :--- |
@@ -62,13 +62,13 @@ Release gate: prefer `sudo ./anonbox check`. **SAFE** means `FAIL_COUNT == 0`, T
 | **08** | Stream Isolation | `curl` to 2 distinct endpoints simultaneously | **Different exit IPs returned** |
 | **09** | Timezone Check | `date +%Z` | Returns `UTC` |
 | **10** | Storage Encryption Check | `findmnt -t ecryptfs` / `lsblk -f` | Active `ecryptfs` mount or `crypto_LUKS` (**FAIL** if missing; blocks SAFE) |
-| **11** | Swap Security Check | `swapon --show` | Swap on LUKS, `zram`, or disabled |
+| **11** | Swap Security Check | `swapon --show` | Swap on LUKS, `zram`, or disabled (**FAIL** if cleartext swap; remediations suggest `swapoff` / LUKS / zram — anonbox does not auto-disable) |
 | **12** | ControlPort Auth Check | `nc -z 127.0.0.1 9053` | Listening on localhost; cookie authentication |
 | **13** | User & Home Isolation | `stat -c %a /home/*` & `umask` | `700` permissions on home and umask `027` |
 | **14** | Core Dump Disabled | `sysctl fs.suid_dumpable` | Returns `0` |
 | **15** | Kernel Yama & TTY | `sysctl kernel.yama.ptrace_scope` | `ptrace_scope >= 2` |
 | **16** | Mounts Security Check | `findmnt /tmp /var/tmp /dev/shm` | Mounted with `noexec,nosuid,nodev` |
-| **17** | AppArmor Status Check | `aa-status` + `journalctl -b -k` | Active; no `apparmor="DENIED"` for Tor this boot |
+| **17** | AppArmor Status Check | `aa-status` + `journalctl -b -k` | Active; **FAIL** only on Tor DENIED after `/var/lib/anonbox/apparmor-applied.at` (stale earlier-boot DENIED → WARN; reboot then re-check) |
 | **18** | TCP Timestamp Check | `sysctl net.ipv4.tcp_timestamps` | Returns `0` |
 | **19** | User Namespaces Check | `sysctl kernel.unprivileged_userns_clone` | **Not** `0` (Tor Browser sandbox) |
 | **20** | Machine-ID Pool Check | `cat /etc/machine-id` | Standardized anonymity UUID |

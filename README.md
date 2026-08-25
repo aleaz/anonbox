@@ -111,7 +111,7 @@ The `anonbox` toolkit provides a unified, idempotent CLI interface:
 
 ```bash
 # Full automated deployment (Setup -> Harden -> Audit)
-sudo ./anonbox all [--bridges-file FILE] [--verbose]
+sudo ./anonbox all [--bridges-file FILE] [--verbose] [--yes]
 
 # Setup Tor transparent proxy, nftables firewall, and DNS routing
 sudo ./anonbox setup [--bridges-file FILE | --no-bridges] [--iface IFACE] [--verbose]
@@ -121,16 +121,29 @@ sudo ./anonbox harden [--iface IFACE] [--dry-run] [--verbose]
 
 # Run the leak-detection and hardening audit (includes kill-switch)
 sudo ./anonbox check
+# Frequent triage without stopping Tor (not a release gate):
+sudo ./anonbox check --no-kill-switch
+# Machine-readable:
+sudo ./anonbox check --json --quiet
+
+# Read-only diagnostics with Fix hints (no kill-switch)
+sudo ./anonbox doctor
 
 # Show current Tor connection health, circuits, and public exit IP
 ./anonbox status
 
 # Rollback configuration to a chosen snapshot
-sudo ./anonbox rollback --snapshot 20260824_120000
+sudo ./anonbox rollback --snapshot 20260824_120000 --yes
 
 # Uninstall anonbox (restore first snapshot + flush firewall)
-sudo ./anonbox uninstall
+sudo ./anonbox uninstall --yes
 ```
+
+**Exit codes** (`check` / `doctor` / `all`): `0` SAFE, `1` leak/network/Tor failure, `2` hardening/storage only.
+
+**Bash completion:** `source completions/anonbox.bash` (zsh: `autoload bashcompinit; bashcompinit` then source).
+
+Per-command help: `./anonbox check --help`.
 
 ## Stream Isolation & Application Routing
 

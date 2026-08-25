@@ -37,6 +37,9 @@ BACKUP_DIR="/var/backups/anonbox"
 LOCALNET_SYSCTL="/etc/sysctl.d/98-anonbox-localnet.conf"
 APPARMOR_TOR_LOCAL="/etc/apparmor.d/local/system_tor"
 TOUCHED_MANIFEST="/var/lib/anonbox/touched-files.manifest"
+APPARMOR_APPLIED_AT="/var/lib/anonbox/apparmor-applied.at"
+ANONBOX_STATE_DIR="/var/lib/anonbox"
+ANONBOX_LOG_DIR="/var/log/anonbox"
 
 LOGIN_DEFS="/etc/login.defs"
 PAM_COMMON_SESSION="/etc/pam.d/common-session"
@@ -73,13 +76,29 @@ VERBOSE=0
 IN_PIPELINE=0
 ROLLBACK_SNAPSHOT=""
 ALLOW_SSH=0
+ASSUME_YES=0
+NO_KILL_SWITCH=0
+QUIET=0
+JSON_OUT=0
+NO_COLOR_FLAG=0
+NO_LOG=0
+LOG_FILE=""
+SESSION_LOG=""
 CURRENT_SNAPSHOT_ID="$(date +%Y%m%d_%H%M%S)"
+HELP_TOPIC=0
 
 # Counters
 PASS_COUNT=0
 SKIP_COUNT=0
 WARN_COUNT=0
 FAIL_COUNT=0
+LEAK_FAIL_COUNT=0
+SOCKS_OK=0
+REMEDIATIONS=()
+FAILURE_MSGS=()
+WARNING_MSGS=()
+VERDICT=""
+LAST_EXIT_CODE=0
 
 # Temp file registry for safe signal handling
 TMP_FILES=()
@@ -98,43 +117,141 @@ trap cleanup EXIT INT TERM HUP
 # Output & Color Formatting
 # =============================================================================
 
-if [[ -t 1 ]]; then
-    GREEN=$'\033[32m'
-    RED=$'\033[31m'
-    YELLOW=$'\033[33m'
-    CYAN=$'\033[36m'
-    BOLD=$'\033[1m'
-    RESET=$'\033[0m'
-else
-    GREEN="" RED="" YELLOW="" CYAN="" BOLD="" RESET=""
-fi
+init_colors()
+{
+    if [[ -n "${NO_COLOR:-}" ]] || (( NO_COLOR_FLAG == 1 )) || [[ ! -t 1 ]]; then
+        GREEN="" RED="" YELLOW="" CYAN="" BOLD="" RESET=""
+    else
+        GREEN=$'\033[32m'
+        RED=$'\033[31m'
+        YELLOW=$'\033[33m'
+        CYAN=$'\033[36m'
+        BOLD=$'\033[1m'
+        RESET=$'\033[0m'
+    fi
+}
 
-ok()     { printf '[ %sOK%s   ] %s\n' "$GREEN"  "$RESET" "$1"; ((PASS_COUNT++)) || true; }
-pass()   { printf '[ %sPASS%s ] %s\n' "$GREEN"  "$RESET" "$1"; ((PASS_COUNT++)) || true; }
-fail()   { printf '[ %sFAIL%s ] %s\n' "$RED"    "$RESET" "$1"; ((FAIL_COUNT++)) || true; }
-warn()   { printf '[ %sWARN%s ] %s\n' "$YELLOW" "$RESET" "$1"; ((WARN_COUNT++)) || true; }
-skip()   { printf '[ %sSKIP%s ] %s\n' "$CYAN"   "$RESET" "$1"; ((SKIP_COUNT++)) || true; }
-info()   { printf '         %s\n' "$1"; }
-vinfo()  { if (( VERBOSE == 1 || DRY_RUN == 1 )); then printf '         %s[DEBUG]%s %s\n' "$CYAN" "$RESET" "$1"; fi; }
-step()   { printf '\n%s==> %s%s\n' "$BOLD" "$1" "$RESET"; }
-section(){ printf '\n%s─── [%s] %s%s\n' "$BOLD" "$1" "$2" "$RESET"; }
-die()    { printf '\n%s[ERROR]%s %s\n' "$RED" "$RESET" "$1" >&2; exit 1; }
+init_colors
+
+# Human output suppressed when quiet or JSON mode (counts still update).
+emit()
+{
+    if (( QUIET == 1 || JSON_OUT == 1 )); then
+        return 0
+    fi
+    printf '%s\n' "$1"
+}
+
+ok()
+{
+    ((PASS_COUNT++)) || true
+    emit "$(printf '[ %sOK%s   ] %s' "$GREEN" "$RESET" "$1")"
+}
+pass()
+{
+    ((PASS_COUNT++)) || true
+    emit "$(printf '[ %sPASS%s ] %s' "$GREEN" "$RESET" "$1")"
+}
+fail()
+{
+    ((FAIL_COUNT++)) || true
+    FAILURE_MSGS+=("$1")
+    emit "$(printf '[ %sFAIL%s ] %s' "$RED" "$RESET" "$1")"
+}
+warn()
+{
+    ((WARN_COUNT++)) || true
+    WARNING_MSGS+=("$1")
+    emit "$(printf '[ %sWARN%s ] %s' "$YELLOW" "$RESET" "$1")"
+}
+skip()
+{
+    ((SKIP_COUNT++)) || true
+    emit "$(printf '[ %sSKIP%s ] %s' "$CYAN" "$RESET" "$1")"
+}
+info()
+{
+    emit "$(printf '         %s' "$1")"
+}
+vinfo()
+{
+    if (( VERBOSE == 1 || DRY_RUN == 1 )); then
+        emit "$(printf '         %s[DEBUG]%s %s' "$CYAN" "$RESET" "$1")"
+    fi
+}
+step()
+{
+    if (( QUIET == 1 || JSON_OUT == 1 )); then
+        return 0
+    fi
+    printf '\n%s==> %s%s\n' "$BOLD" "$1" "$RESET"
+}
+section()
+{
+    if (( QUIET == 1 || JSON_OUT == 1 )); then
+        return 0
+    fi
+    printf '\n%s─── [%s] %s%s\n' "$BOLD" "$1" "$2" "$RESET"
+}
+die()
+{
+    printf '\n%s[ERROR]%s %s\n' "$RED" "$RESET" "$1" >&2
+    exit 1
+}
+
+# fail_fix MSG HINT [ID] [severity]
+# severity: harden (default, exit 2) | leak (exit 1)
+fail_fix()
+{
+    local msg="$1"
+    local hint="${2:-}"
+    local id="${3:-issue}"
+    local severity="${4:-harden}"
+    fail "$msg"
+    if [[ -n "$hint" ]]; then
+        info "Fix: $hint"
+        REMEDIATIONS+=("${id}|${hint}")
+    fi
+    if [[ "$severity" == "leak" ]]; then
+        ((LEAK_FAIL_COUNT++)) || true
+    fi
+}
+
+reset_audit_counters()
+{
+    PASS_COUNT=0
+    WARN_COUNT=0
+    FAIL_COUNT=0
+    SKIP_COUNT=0
+    LEAK_FAIL_COUNT=0
+    SOCKS_OK=0
+    REMEDIATIONS=()
+    FAILURE_MSGS=()
+    WARNING_MSGS=()
+    VERDICT=""
+    LAST_EXIT_CODE=0
+}
 
 phase_header()
 {
     local num="$1" total="$2" title="$3"
+    if (( QUIET == 1 || JSON_OUT == 1 )); then
+        return 0
+    fi
     printf '\n%s%s======================================================================%s\n' "$BOLD" "$CYAN" "$RESET"
-    printf '%s%s [FASE %s/%s] %s%s\n' "$BOLD" "$CYAN" "$num" "$total" "$title" "$RESET"
+    printf '%s%s [PHASE %s/%s] %s%s\n' "$BOLD" "$CYAN" "$num" "$total" "$title" "$RESET"
     printf '%s%s======================================================================%s\n' "$BOLD" "$CYAN" "$RESET"
 }
 
 run()
 {
     if (( DRY_RUN == 1 )); then
-        printf '%s[DRY-RUN]%s %s\n' "$CYAN" "$RESET" "$*"
+        if (( QUIET == 0 && JSON_OUT == 0 )); then
+            printf '%s[DRY-RUN]%s %s\n' "$CYAN" "$RESET" "$*"
+        fi
         return 0
     fi
-    if (( VERBOSE == 1 )); then
+    if (( VERBOSE == 1 && QUIET == 0 && JSON_OUT == 0 )); then
         printf '%s[EXEC]%s %s\n' "$CYAN" "$RESET" "$*"
     fi
     "$@"
@@ -150,6 +267,42 @@ require_root()
     fi
 }
 
+confirm_or_die()
+{
+    local prompt="$1"
+    local expected="${2:-yes}"
+    if (( ASSUME_YES == 1 )); then
+        return 0
+    fi
+    if [[ ! -t 0 ]]; then
+        die "${prompt} Non-interactive mode requires --yes."
+    fi
+    local ans
+    printf '%s [%s]: ' "$prompt" "$expected"
+    read -r ans
+    if [[ "$ans" != "$expected" ]]; then
+        die "Aborted (expected confirmation: $expected)."
+    fi
+}
+
+prompt_continue_or_die()
+{
+    local prompt="$1"
+    if (( ASSUME_YES == 1 )); then
+        return 0
+    fi
+    if [[ ! -t 0 ]]; then
+        die "${prompt} Re-run with --yes to continue non-interactively."
+    fi
+    local ans
+    printf '%s [y/N]: ' "$prompt"
+    read -r ans
+    case "$ans" in
+        y|Y|yes|YES) return 0 ;;
+        *) die "Aborted by user." ;;
+    esac
+}
+
 validate_os()
 {
     if [[ -f "/etc/os-release" ]]; then
@@ -160,6 +313,208 @@ validate_os()
         if [[ "$os_id" != "debian" && "$os_like" != *"debian"* ]]; then
             warn "Target OS appears to be '$os_id'. anonbox is designed and tested for Debian GNU/Linux 12 (Bookworm) and 13 (Trixie)."
         fi
+    fi
+}
+
+swap_is_insecure()
+{
+    local swap_out
+    swap_out="$(swapon --show --noheadings 2>/dev/null || true)"
+    [[ -n "$swap_out" ]] || return 1
+    if printf '%s\n' "$swap_out" | grep -qiE 'crypt|zram'; then
+        return 1
+    fi
+    return 0
+}
+
+preflight_checks()
+{
+    if [[ -n "$BRIDGES_FILE" && "$NO_BRIDGES" -eq 1 ]]; then
+        die "Conflicting options: --bridges-file and --no-bridges cannot be used together."
+    fi
+    if [[ -n "$BRIDGES_FILE" ]]; then
+        [[ -f "$BRIDGES_FILE" ]] || die "Bridges file not found: $BRIDGES_FILE"
+        if ! grep -qE '^[[:space:]]*Bridge[[:space:]]+' "$BRIDGES_FILE" 2>/dev/null; then
+            die "Bridges file has no active 'Bridge ...' lines: $BRIDGES_FILE"
+        fi
+    fi
+
+    if [[ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}" ]] && (( ALLOW_SSH == 0 )); then
+        warn "SSH session detected but --allow-ssh was NOT set. After reboot, inbound SSH is blocked by default — you may lock yourself out."
+        prompt_continue_or_die "Continue without --allow-ssh?"
+    fi
+
+    if swap_is_insecure; then
+        warn "Unencrypted swap is active; 'anonbox check' will FAIL SAFE until swap is disabled, encrypted, or moved to zram (swapon --show)."
+    fi
+
+    if ! storage_encrypted; then
+        warn "No LUKS/eCryptfs detected; SAFE verdict will be blocked until encrypted storage is present."
+    fi
+}
+
+record_apparmor_applied()
+{
+    if (( DRY_RUN == 1 )); then
+        return 0
+    fi
+    run mkdir -p "$ANONBOX_STATE_DIR"
+    date +%s > "$APPARMOR_APPLIED_AT" 2>/dev/null || true
+}
+
+# Print audit summary; sets LAST_EXIT_CODE and VERDICT; returns that code.
+print_audit_summary()
+{
+    local tor_up=0 enc_ok=0
+    if systemctl is-active --quiet tor@default.service 2>/dev/null; then
+        tor_up=1
+    fi
+    if storage_encrypted; then
+        enc_ok=1
+    fi
+
+    local reasons=()
+    if (( FAIL_COUNT > 0 )); then
+        reasons+=("${FAIL_COUNT} failing check(s)")
+    fi
+    if (( tor_up == 0 )); then
+        reasons+=("Tor is not active")
+        ((LEAK_FAIL_COUNT++)) || true
+    fi
+    if (( enc_ok == 0 )); then
+        reasons+=("storage is unencrypted")
+    fi
+
+    if (( FAIL_COUNT == 0 && tor_up == 1 && enc_ok == 1 )); then
+        VERDICT="SAFE"
+        LAST_EXIT_CODE=0
+    elif (( LEAK_FAIL_COUNT > 0 )); then
+        VERDICT="UNSAFE"
+        LAST_EXIT_CODE=1
+    else
+        VERDICT="UNSAFE"
+        LAST_EXIT_CODE=2
+    fi
+
+    if (( JSON_OUT == 1 )); then
+        emit_json_report
+        return "$LAST_EXIT_CODE"
+    fi
+
+    # Quiet mode still prints the summary block.
+    printf '\n==========================================\n'
+    printf '             AUDIT SUMMARY\n'
+    printf '==========================================\n'
+    printf 'PASS : %d\n' "$PASS_COUNT"
+    printf 'WARN : %d\n' "$WARN_COUNT"
+    printf 'FAIL : %d\n' "$FAIL_COUNT"
+    printf 'SKIP : %d\n' "$SKIP_COUNT"
+    printf '\n'
+
+    if [[ "$VERDICT" == "SAFE" ]]; then
+        printf '%s%sSAFE: Traffic is transparently routed through Tor with active hardening.%s\n' "$BOLD" "$GREEN" "$RESET"
+    else
+        local reason_str=""
+        local save_ifs="$IFS"
+        IFS='; '
+        reason_str="${reasons[*]}"
+        IFS="$save_ifs"
+        printf '%s%sUNSAFE: %s.%s\n' "$BOLD" "$RED" "$reason_str" "$RESET"
+    fi
+
+    if [[ ${#REMEDIATIONS[@]} -gt 0 ]]; then
+        printf '\nNext steps:\n'
+        local i=1 item id hint
+        for item in "${REMEDIATIONS[@]}"; do
+            id="${item%%|*}"
+            hint="${item#*|}"
+            printf '  %d. [%s] %s\n' "$i" "$id" "$hint"
+            ((i++)) || true
+        done
+    fi
+    printf '\n'
+    printf 'Exit code: %d (0=SAFE, 1=leak/network, 2=hardening/storage)\n\n' "$LAST_EXIT_CODE"
+    return "$LAST_EXIT_CODE"
+}
+
+json_escape()
+{
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+emit_json_strings()
+{
+    local first=1 item
+    printf '['
+    for item in "$@"; do
+        (( first == 1 )) || printf ','
+        first=0
+        printf '"%s"' "$(json_escape "$item")"
+    done
+    printf ']'
+}
+
+emit_json_remediations()
+{
+    local first=1 item id hint
+    printf '['
+    for item in "${REMEDIATIONS[@]+"${REMEDIATIONS[@]}"}"; do
+        (( first == 1 )) || printf ','
+        first=0
+        id="${item%%|*}"
+        hint="${item#*|}"
+        printf '{"id":"%s","fix":"%s"}' "$(json_escape "$id")" "$(json_escape "$hint")"
+    done
+    printf ']'
+}
+
+emit_json_report()
+{
+    local tor_active="false"
+    systemctl is-active --quiet tor@default.service 2>/dev/null && tor_active="true"
+    printf '{'
+    printf '"version":"%s",' "$(json_escape "$VERSION")"
+    printf '"verdict":"%s",' "$(json_escape "$VERDICT")"
+    printf '"exit_code":%d,' "$LAST_EXIT_CODE"
+    printf '"counts":{"pass":%d,"warn":%d,"fail":%d,"skip":%d,"leak_fail":%d},' \
+        "$PASS_COUNT" "$WARN_COUNT" "$FAIL_COUNT" "$SKIP_COUNT" "$LEAK_FAIL_COUNT"
+    printf '"failures":'
+    emit_json_strings "${FAILURE_MSGS[@]+"${FAILURE_MSGS[@]}"}"
+    printf ','
+    printf '"warnings":'
+    emit_json_strings "${WARNING_MSGS[@]+"${WARNING_MSGS[@]}"}"
+    printf ','
+    printf '"remediations":'; emit_json_remediations; printf ','
+    printf '"network":{"iface":"%s","iface_ip":"%s","tor_active":%s}' \
+        "$(json_escape "${IFACE:-}")" "$(json_escape "${IFACE_IP:-}")" "$tor_active"
+    printf '}\n'
+}
+
+start_session_log()
+{
+    if (( NO_LOG == 1 || DRY_RUN == 1 )); then
+        return 0
+    fi
+    if [[ "$(id -u)" -ne 0 ]]; then
+        return 0
+    fi
+    if [[ -n "$LOG_FILE" ]]; then
+        SESSION_LOG="$LOG_FILE"
+    else
+        mkdir -p "$ANONBOX_LOG_DIR" 2>/dev/null || return 0
+        SESSION_LOG="${ANONBOX_LOG_DIR}/anonbox-$(date +%Y%m%d-%H%M%S).log"
+    fi
+    touch "$SESSION_LOG" 2>/dev/null || return 0
+    # shellcheck disable=SC2094
+    exec > >(tee -a "$SESSION_LOG") 2>&1
+    if (( QUIET == 0 && JSON_OUT == 0 )); then
+        printf '         Session log: %s\n' "$SESSION_LOG"
     fi
 }
 
@@ -493,6 +848,7 @@ EOF
         die "AppArmor parser failed for ${profile}: $(tr '\n' ' ' < "$parser_err")"
     fi
     rm -f "$parser_err"
+    record_apparmor_applied
     ok "AppArmor Tor profile reloaded ($profile)"
 }
 
@@ -714,8 +1070,8 @@ cmd_setup()
     fi
     write_touched_manifest_header
 
-    if [[ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}" ]] && (( ALLOW_SSH == 0 )); then
-        warn "SSH session detected but --allow-ssh was NOT set. After reboot, inbound SSH is blocked by default — you may lock yourself out. Re-run with --allow-ssh if remote admin is required."
+    if (( IN_PIPELINE == 0 )); then
+        preflight_checks
     fi
     warn_iface_ip_drift
 
@@ -1436,15 +1792,17 @@ EOF
 
 cmd_check()
 {
-    PASS_COUNT=0
-    WARN_COUNT=0
-    FAIL_COUNT=0
-    SKIP_COUNT=0
+    reset_audit_counters
 
     step "anonbox Security, Leak Detection & Hardening Audit"
 
     if (( DRY_RUN == 1 )); then
         skip "Skipping active network socket and kernel audit tests in dry-run mode"
+        VERDICT="SAFE"
+        LAST_EXIT_CODE=0
+        if (( JSON_OUT == 1 )); then
+            emit_json_report
+        fi
         return 0
     fi
 
@@ -1459,12 +1817,14 @@ cmd_check()
     if (( tor_active == 1 )); then
         pass "tor@default.service is active"
     else
-        fail "tor@default.service is not active"
+        fail_fix "tor@default.service is not active" \
+            "sudo systemctl start tor@default; or re-run: sudo ./anonbox setup" "tor" "leak"
     fi
     if [[ -f "$ANONBOX_TOR_DEFAULTS" ]]; then
         pass "anonbox-defaults-torrc present ($ANONBOX_TOR_DEFAULTS)"
     else
-        fail "$ANONBOX_TOR_DEFAULTS is missing (Debian insecure SocksPort/unix may apply). Re-run setup."
+        fail_fix "$ANONBOX_TOR_DEFAULTS is missing (Debian insecure SocksPort/unix may apply)" \
+            "sudo ./anonbox setup" "tor-defaults" "leak"
     fi
     local unit_exec
     unit_exec="$(systemctl show -p ExecStart tor@default.service 2>/dev/null || true)"
@@ -1474,33 +1834,39 @@ cmd_check()
     if printf '%s\n' "$unit_exec" | grep -qE -- "--defaults-torrc[= ]${ANONBOX_TOR_DEFAULTS}|--defaults-torrc[= ]/etc/tor/anonbox-defaults-torrc"; then
         pass "tor@default ExecStart uses --defaults-torrc ${ANONBOX_TOR_DEFAULTS}"
     else
-        fail "tor@default ExecStart missing --defaults-torrc ${ANONBOX_TOR_DEFAULTS}. Re-run setup."
+        fail_fix "tor@default ExecStart missing --defaults-torrc ${ANONBOX_TOR_DEFAULTS}" \
+            "sudo ./anonbox setup" "tor-defaults" "leak"
     fi
     if [[ -f "$TORRC" ]]; then
         if grep -E '^[[:space:]]*(TransPort|DNSPort)[[:space:]]+(0\.0\.0\.0|\*)' "$TORRC" >/dev/null 2>&1; then
-            fail "torrc still has 0.0.0.0 TransPort/DNSPort (bind conflict). Re-run setup."
+            fail_fix "torrc still has 0.0.0.0 TransPort/DNSPort (bind conflict)" \
+                "sudo ./anonbox setup" "listeners" "leak"
         else
             pass "torrc TransPort/DNSPort are not bound to 0.0.0.0"
         fi
     else
-        fail "$TORRC is missing"
+        fail_fix "$TORRC is missing" "sudo ./anonbox setup" "torrc" "leak"
     fi
     detect_network
     if (( tor_active == 1 )); then
         local port listen bind_ok=1 configured_tp live_tp
         if [[ -z "$IFACE_IP" ]]; then
-            fail "No primary IPv4 on ${IFACE}; cannot verify TransPort/DNSPort NIC binds (re-run setup after network is up)"
+            fail_fix "No primary IPv4 on ${IFACE}; cannot verify TransPort/DNSPort NIC binds" \
+                "Bring the NIC up, then: sudo ./anonbox setup" "iface" "leak"
         fi
         for port in 9050 9051 9052 9053; do
             listen="$(ss -lntH "sport = :${port}" 2>/dev/null || true)"
             if [[ -z "$listen" ]]; then
-                fail "TCP port ${port} is not listening"
+                fail_fix "TCP port ${port} is not listening" \
+                    "sudo systemctl restart tor@default; sudo ./anonbox setup" "listeners" "leak"
                 bind_ok=0
             elif printf '%s\n' "$listen" | grep -qE "0\\.0\\.0\\.0:${port}|\\*:${port}"; then
-                fail "TCP port ${port} is bound on all interfaces"
+                fail_fix "TCP port ${port} is bound on all interfaces" \
+                    "sudo ./anonbox setup" "listeners" "leak"
                 bind_ok=0
             elif ! printf '%s\n' "$listen" | grep -q '127.0.0.1'; then
-                fail "TCP port ${port} is not bound to 127.0.0.1"
+                fail_fix "TCP port ${port} is not bound to 127.0.0.1" \
+                    "sudo ./anonbox setup" "listeners" "leak"
                 bind_ok=0
             fi
         done
@@ -1511,39 +1877,48 @@ cmd_check()
         if [[ -z "$IFACE_IP" ]]; then
             : # already failed above
         elif [[ -z "$listen" ]]; then
-            fail "TransPort TCP 9040 is not listening"
+            fail_fix "TransPort TCP 9040 is not listening" \
+                "sudo ./anonbox setup" "listeners" "leak"
         elif printf '%s\n' "$listen" | grep -qE '0\.0\.0\.0:9040|\*:9040'; then
-            fail "TransPort is bound on 0.0.0.0"
+            fail_fix "TransPort is bound on 0.0.0.0" \
+                "sudo ./anonbox setup" "listeners" "leak"
         elif ! printf '%s\n' "$listen" | grep -q '127.0.0.1:9040'; then
-            fail "TransPort missing 127.0.0.1:9040"
+            fail_fix "TransPort missing 127.0.0.1:9040" \
+                "sudo ./anonbox setup" "listeners" "leak"
         elif ! printf '%s\n' "$listen" | grep -q "${IFACE_IP}:9040"; then
-            fail "TransPort missing ${IFACE_IP}:9040 (nft redirect target)"
+            fail_fix "TransPort missing ${IFACE_IP}:9040 (nft redirect target)" \
+                "sudo ./anonbox setup" "listeners" "leak"
         else
             pass "TransPort listens on 127.0.0.1 and NIC IP (not 0.0.0.0)"
         fi
-        # IFACE_IP drift: live primary must match torrc and ss TransPort NIC bind
         if [[ -n "$IFACE_IP" ]]; then
             configured_tp="$(torrc_transport_nic_ip)"
             live_tp="$(ss_transport_nic_ip)"
             if [[ -n "$configured_tp" && "$configured_tp" != "$IFACE_IP" ]]; then
-                fail "IFACE_IP drift: live primary ${IFACE_IP} ≠ torrc TransPort ${configured_tp}. Re-run setup."
+                fail_fix "IFACE_IP drift: live primary ${IFACE_IP} ≠ torrc TransPort ${configured_tp}" \
+                    "sudo ./anonbox setup (after DHCP/IP change)" "iface-drift" "leak"
             elif [[ -n "$live_tp" && "$live_tp" != "$IFACE_IP" ]]; then
-                fail "IFACE_IP drift: live primary ${IFACE_IP} ≠ ss TransPort bind ${live_tp}. Re-run setup."
+                fail_fix "IFACE_IP drift: live primary ${IFACE_IP} ≠ ss TransPort bind ${live_tp}" \
+                    "sudo ./anonbox setup (after DHCP/IP change)" "iface-drift" "leak"
             elif [[ -n "$configured_tp" || -n "$live_tp" ]]; then
                 pass "TransPort NIC bind matches live primary IPv4 (${IFACE_IP})"
             fi
         fi
         listen="$(ss -lnuH "sport = :5353" 2>/dev/null || true)"
         if [[ -z "$IFACE_IP" ]]; then
-            : # already failed above
+            :
         elif [[ -z "$listen" ]]; then
-            fail "DNSPort UDP 5353 is not listening"
+            fail_fix "DNSPort UDP 5353 is not listening" \
+                "sudo ./anonbox setup" "listeners" "leak"
         elif printf '%s\n' "$listen" | grep -qE '0\.0\.0\.0:5353|\*:5353'; then
-            fail "DNSPort is bound on 0.0.0.0"
+            fail_fix "DNSPort is bound on 0.0.0.0" \
+                "sudo ./anonbox setup" "listeners" "leak"
         elif ! printf '%s\n' "$listen" | grep -q '127.0.0.1:5353'; then
-            fail "DNSPort missing 127.0.0.1:5353"
+            fail_fix "DNSPort missing 127.0.0.1:5353" \
+                "sudo ./anonbox setup" "listeners" "leak"
         elif ! printf '%s\n' "$listen" | grep -q "${IFACE_IP}:5353"; then
-            fail "DNSPort missing ${IFACE_IP}:5353 (nft redirect target)"
+            fail_fix "DNSPort missing ${IFACE_IP}:5353 (nft redirect target)" \
+                "sudo ./anonbox setup" "listeners" "leak"
         else
             pass "DNSPort listens on 127.0.0.1 and NIC IP (not 0.0.0.0)"
         fi
@@ -1558,17 +1933,19 @@ cmd_check()
     fi
 
     section "2" "Testing SOCKS5 Proxy (127.0.0.1:9050)"
-    local socks_ip socks_try
+    local socks_ip
     socks_ip=""
-    for socks_try in 1 2 3; do
+    for _socks_try in 1 2 3; do
         socks_ip="$(curl -s --socks5-hostname 127.0.0.1:9050 --max-time 20 https://check.torproject.org/api/ip 2>/dev/null | grep -o '"IP":"[^"]*' | cut -d'"' -f4 || echo '')"
         [[ -n "$socks_ip" ]] && break
         sleep 2
     done
     if [[ -n "$socks_ip" ]]; then
         pass "SOCKS5 routing active. Exit IP: $socks_ip"
+        SOCKS_OK=1
     else
-        fail "SOCKS5 port 9050 is not routing or unreachable"
+        fail_fix "SOCKS5 port 9050 is not routing or unreachable" \
+            "Check bridges/bootstrap: journalctl -u tor@default; sudo ./anonbox setup" "socks" "leak"
     fi
 
     section "3" "Testing Transparent TCP Proxying"
@@ -1578,7 +1955,8 @@ cmd_check()
     if [[ "$is_tor" == "true" ]]; then
         pass "Transparent Proxying confirmed (IsTor=true, Exit IP: $trans_ip)"
     else
-        fail "Transparent Proxying is NOT working! Real traffic may be leaking or blocked."
+        fail_fix "Transparent Proxying is NOT working! Real traffic may be leaking or blocked." \
+            "Do not browse; re-run: sudo ./anonbox setup" "transparent" "leak"
     fi
 
     section "4" "Testing DNS Leak Prevention"
@@ -1590,16 +1968,15 @@ cmd_check()
         else
             warn "Tor DNSPort did not return whoami.akamai.net response"
         fi
-        # All UDP/53 is redirected to Tor DNSPort, so dig @1.1.1.1:53 MUST succeed via Tor
-        # (eth0 never sees the packet). A failure here means intercept is broken.
         if dig @1.1.1.1 google.com +time=3 +tries=1 >/dev/null 2>&1; then
             pass "UDP/53 to external resolvers is intercepted by Tor DNSPort"
         else
-            fail "UDP/53 intercept failed (dig @1.1.1.1 got no Tor DNS answer)"
+            fail_fix "UDP/53 intercept failed (dig @1.1.1.1 got no Tor DNS answer)" \
+                "sudo ./anonbox setup" "dns" "leak"
         fi
-        # Non-53 UDP must not leave the host (nc -u -z is a false positive for drop).
         if dig @8.8.8.8 -p 5353 google.com +time=2 +tries=1 >/dev/null 2>&1; then
-            fail "CRITICAL: UDP to 8.8.8.8:5353 SUCCEEDED (UDP Leak Detected!)"
+            fail_fix "CRITICAL: UDP to 8.8.8.8:5353 SUCCEEDED (UDP Leak Detected!)" \
+                "Do not browse; re-run: sudo ./anonbox setup" "udp-leak" "leak"
         else
             pass "Non-DNS UDP to external host was BLOCKED (No Leak)"
         fi
@@ -1609,26 +1986,37 @@ cmd_check()
 
     section "5" "Testing IPv6 / ICMP / UDP Egress"
     if curl -6 -s --max-time 3 https://icanhazip.com >/dev/null 2>&1; then
-        fail "CRITICAL: IPv6 traffic escaped to Internet (IPv6 Leak!)"
+        fail_fix "CRITICAL: IPv6 traffic escaped to Internet (IPv6 Leak!)" \
+            "Do not browse; re-run: sudo ./anonbox setup" "ipv6-leak" "leak"
     else
         pass "IPv6 egress is completely disabled/blocked"
     fi
     if ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1; then
-        fail "CRITICAL: ICMP Ping to 1.1.1.1 succeeded (ICMP Leak!)"
+        fail_fix "CRITICAL: ICMP Ping to 1.1.1.1 succeeded (ICMP Leak!)" \
+            "Do not browse; re-run: sudo ./anonbox setup" "icmp-leak" "leak"
     else
         pass "External ICMP ping was dropped by firewall (No Leak)"
     fi
-    # Covered in section 4 with dig to a non-53 UDP port (nc -uz always "succeeds")
     pass "UDP egress policy enforced via filter drop (see DNS section non-53 probe)"
 
     section "6" "Testing Stream Isolation"
-    local ip_a ip_b
-    ip_a="$(curl -s --socks5-hostname 127.0.0.1:9050 --max-time 20 https://icanhazip.com 2>/dev/null || echo '')"
-    ip_b="$(curl -s --socks5-hostname 127.0.0.1:9051 --max-time 20 https://icanhazip.com 2>/dev/null || echo '')"
+    local ip_a="" ip_b=""
+    for _iso_try in 1 2; do
+        ip_a="$(curl -s --socks5-hostname 127.0.0.1:9050 --max-time 20 https://icanhazip.com 2>/dev/null || echo '')"
+        ip_b="$(curl -s --socks5-hostname 127.0.0.1:9051 --max-time 20 https://icanhazip.com 2>/dev/null || echo '')"
+        if [[ -n "$ip_a" && -n "$ip_b" ]]; then
+            break
+        fi
+        sleep 3
+    done
     if [[ -n "$ip_a" && -n "$ip_b" && "$ip_a" != "$ip_b" ]]; then
         pass "Stream isolation confirmed (Port 9050: $ip_a vs Port 9051: $ip_b)"
     elif [[ -n "$ip_a" && -n "$ip_b" ]]; then
         info "Stream isolation test: circuits may currently share an exit; not a FAIL"
+    elif [[ -n "$ip_a" || -n "$ip_b" ]]; then
+        warn "Stream isolation partial: one SOCKS port responded and the other did not"
+    elif (( SOCKS_OK == 1 )); then
+        warn "Stream isolation test skipped (transient SOCKS curl failure under bridges; section 2 SOCKS OK)"
     else
         warn "Stream isolation test skipped (SOCKS curl failed on 9050/9051)"
     fi
@@ -1663,7 +2051,8 @@ cmd_check()
     if [[ "$tcp_ts" == "0" ]]; then
         pass "TCP timestamps disabled (tcp_timestamps=0)"
     else
-        fail "net.ipv4.tcp_timestamps is ${tcp_ts} (expected 0)"
+        fail_fix "net.ipv4.tcp_timestamps is ${tcp_ts} (expected 0)" \
+            "sudo ./anonbox harden" "sysctl" "harden"
     fi
     userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || echo '?')"
     if [[ "$userns" == "0" ]]; then
@@ -1690,7 +2079,8 @@ cmd_check()
     if storage_encrypted; then
         pass "Encrypted storage is active (LUKS/dm-crypt or eCryptfs)"
     else
-        fail "No LUKS/eCryptfs detected. Disk images would store plaintext. SAFE is blocked."
+        fail_fix "No LUKS/eCryptfs detected. Disk images would store plaintext. SAFE is blocked." \
+            "Install Debian with LUKS full-disk encryption (or eCryptfs); setup does not encrypt for you" "luks" "harden"
     fi
 
     section "9" "Swap security"
@@ -1701,7 +2091,8 @@ cmd_check()
     elif printf '%s\n' "$swap_out" | grep -qiE 'crypt|zram'; then
         pass "Swap is on encrypted or zram device"
     else
-        fail "Swap is active on an unencrypted device"
+        fail_fix "Swap is active on an unencrypted device" \
+            "Inspect with: swapon --show; lsblk -f. Then: sudo swapoff -a and comment swap in /etc/fstab, or use LUKS/zram swap" "swap" "harden"
     fi
 
     section "10" "Live nftables kernel ruleset"
@@ -1711,7 +2102,8 @@ cmd_check()
         if [[ "$tables_active" == *"tor_nat"* && "$tables_active" == *"tor_filter"* ]]; then
             pass "Live kernel has active anonbox firewall tables (tor_nat, tor_filter)"
         else
-            fail "Kernel does not contain active tor_nat/tor_filter tables! Run 'sudo ./anonbox setup'"
+            fail_fix "Kernel does not contain active tor_nat/tor_filter tables" \
+                "sudo ./anonbox setup" "nft" "leak"
         fi
         nft_out="$(nft list table ip tor_filter 2>/dev/null || true)"
         if printf '%s\n' "$nft_out" | grep -q 'tcp dport 22 accept'; then
@@ -1722,23 +2114,27 @@ cmd_check()
         if printf '%s\n' "$nft_out" | grep -qE 'tcp dport.*(9040|5353).*drop|dport \{ 9040'; then
             pass "INPUT explicitly drops TransPort/DNSPort (NIC bind residual)"
         else
-            fail "INPUT missing explicit drop for 9040/5353; re-run setup"
+            fail_fix "INPUT missing explicit drop for 9040/5353" \
+                "sudo ./anonbox setup" "nft" "leak"
         fi
         if printf '%s\n' "$nft_out" | grep -q 'fib daddr type local'; then
             pass "OUTPUT allows fib daddr type local (post-redirect delivery)"
         elif printf '%s\n' "$nft_out" | grep -qE "ip daddr ${IFACE_IP}.*dport 9040|daddr ${IFACE_IP} tcp dport 9040"; then
             pass "OUTPUT allows post-redirect delivery to ${IFACE_IP}:9040/5353"
         else
-            fail "OUTPUT missing post-redirect local delivery accept; re-run setup"
+            fail_fix "OUTPUT missing post-redirect local delivery accept" \
+                "sudo ./anonbox setup" "nft" "leak"
         fi
         nft_out="$(nft list table ip tor_nat 2>/dev/null || true)"
         if printf '%s\n' "$nft_out" | grep -qE 'redirect to :(9040|5353)'; then
             pass "NAT chain uses nft redirect to :9040/:5353"
         else
-            fail "NAT chain missing redirect to :9040/:5353; re-run setup"
+            fail_fix "NAT chain missing redirect to :9040/:5353" \
+                "sudo ./anonbox setup" "nft" "leak"
         fi
         if printf '%s\n' "$nft_out" | grep -q 'dnat to 127.0.0.1'; then
-            fail "NAT still uses DNAT to 127.0.0.1 (broken on this path); re-run setup"
+            fail_fix "NAT still uses DNAT to 127.0.0.1 (broken on this path)" \
+                "sudo ./anonbox setup" "nft" "leak"
         fi
         if systemctl show -p After nftables.service 2>/dev/null | grep -qE 'systemd-modules-load|sysinit'; then
             pass "nftables.service After= includes modules-load or sysinit"
@@ -1746,22 +2142,43 @@ cmd_check()
             warn "nftables override may lack After=systemd-modules-load/sysinit (re-run setup)"
         fi
     else
-        fail "nft binary not found in PATH"
+        fail_fix "nft binary not found in PATH" \
+            "apt install nftables; sudo ./anonbox setup" "nft" "leak"
     fi
 
     section "11" "AppArmor enforce and Tor denials"
     if command -v aa-status >/dev/null 2>&1 && aa-status --enabled 2>/dev/null; then
         pass "AppArmor is enabled and active in kernel"
     else
-        fail "AppArmor status could not be verified or is inactive"
+        fail_fix "AppArmor status could not be verified or is inactive" \
+            "apt install apparmor; sudo ./anonbox harden" "apparmor" "harden"
     fi
-    local aa_denied
-    aa_denied="$(journalctl -b -k --no-pager 2>/dev/null | grep -E 'apparmor="DENIED"' | grep -Ei 'comm="tor"|/usr/bin/tor|profile="system_tor"' || true)"
-    if [[ -n "$aa_denied" ]]; then
-        fail "AppArmor DENIED entries for Tor this boot (see journalctl -b -k)"
-        info "$(printf '%s\n' "$aa_denied" | tail -n 3)"
+    local aa_denied_all aa_denied_live aa_marker_epoch=""
+    aa_denied_all="$(journalctl -b -k --no-pager 2>/dev/null | grep -E 'apparmor="DENIED"' | grep -Ei 'comm="tor"|/usr/bin/tor|profile="system_tor"' || true)"
+    if [[ -f "$APPARMOR_APPLIED_AT" ]]; then
+        aa_marker_epoch="$(tr -d '[:space:]' < "$APPARMOR_APPLIED_AT" 2>/dev/null || true)"
+    fi
+    if [[ -n "$aa_marker_epoch" && "$aa_marker_epoch" =~ ^[0-9]+$ ]]; then
+        aa_denied_live="$(journalctl -b -k --since="@${aa_marker_epoch}" --no-pager 2>/dev/null | grep -E 'apparmor="DENIED"' | grep -Ei 'comm="tor"|/usr/bin/tor|profile="system_tor"' || true)"
+        if [[ -n "$aa_denied_live" ]]; then
+            fail_fix "AppArmor DENIED entries for Tor after profile apply (live)" \
+                "Inspect: journalctl -b -k | grep DENIED; ensure /etc/apparmor.d/local/system_tor has owner /var/lib/tor/; sudo ./anonbox harden" \
+                "apparmor" "harden"
+            info "$(printf '%s\n' "$aa_denied_live" | tail -n 3)"
+        elif [[ -n "$aa_denied_all" ]]; then
+            warn "Stale AppArmor DENIED earlier this boot (before profile apply); reboot then re-check"
+        else
+            pass "No AppArmor DENIED records for Tor this boot"
+        fi
     else
-        pass "No AppArmor DENIED records for Tor this boot"
+        if [[ -n "$aa_denied_all" ]]; then
+            warn "AppArmor DENIED for Tor this boot (no apparmor-applied.at marker); re-run harden then reboot"
+            info "Fix: sudo ./anonbox harden && sudo reboot"
+            REMEDIATIONS+=("apparmor|sudo ./anonbox harden && sudo reboot; then sudo ./anonbox check")
+            info "$(printf '%s\n' "$aa_denied_all" | tail -n 3)"
+        else
+            pass "No AppArmor DENIED records for Tor this boot"
+        fi
     fi
 
     section "12" "Filesystem mount flags"
@@ -1794,7 +2211,8 @@ cmd_check()
     if nc -z 127.0.0.1 9053 2>/dev/null; then
         pass "ControlPort 127.0.0.1:9053 is listening (cookie authentication)"
     else
-        fail "ControlPort 127.0.0.1:9053 is not listening"
+        fail_fix "ControlPort 127.0.0.1:9053 is not listening" \
+            "sudo ./anonbox setup" "controlport" "leak"
     fi
     if [[ -f "$NM_CONN_CONF" ]] && grep -q "enabled=false" "$NM_CONN_CONF" 2>/dev/null; then
         pass "NetworkManager connectivity check is disabled"
@@ -1806,42 +2224,34 @@ cmd_check()
     if printf '%s\n' "$nft_before" | grep -q "network-pre.target"; then
         pass "nftables.service Before= includes network-pre.target"
     else
-        fail "nftables.service is not ordered Before=network-pre.target"
+        fail_fix "nftables.service is not ordered Before=network-pre.target" \
+            "sudo ./anonbox setup" "nft-boot" "leak"
     fi
 
     section "14" "Kill-switch (Tor down => no leak)"
-    if (( tor_active == 1 )); then
+    if (( NO_KILL_SWITCH == 1 )); then
+        skip "Kill-switch skipped (--no-kill-switch); release gate requires full check without this flag"
+    elif (( tor_active == 1 )); then
         systemctl stop tor@default.service >/dev/null 2>&1 || true
         sleep 1
         if curl -s --max-time 5 https://check.torproject.org/api/ip >/dev/null 2>&1; then
-            fail "CRITICAL: curl succeeded while Tor was stopped (kill-switch failed)"
+            fail_fix "CRITICAL: curl succeeded while Tor was stopped (kill-switch failed)" \
+                "Do not browse; re-run: sudo ./anonbox setup" "kill-switch" "leak"
         else
             pass "Kill-switch: TCP/HTTPS produced no response while Tor is down"
         fi
         systemctl start tor@default.service >/dev/null 2>&1 || true
         info "Waiting for Tor to recover after kill-switch test..."
         if ! wait_for_tor_bootstrap; then
-            fail "Tor did not recover after kill-switch test"
+            fail_fix "Tor did not recover after kill-switch test" \
+                "journalctl -u tor@default; sudo ./anonbox setup" "tor" "leak"
         fi
     else
         skip "Kill-switch skipped because Tor was not active"
     fi
 
-    printf '\n==========================================\n'
-    printf '             AUDIT SUMMARY\n'
-    printf '==========================================\n'
-    printf 'PASS : %d\n' "$PASS_COUNT"
-    printf 'WARN : %d\n' "$WARN_COUNT"
-    printf 'FAIL : %d\n' "$FAIL_COUNT"
-    printf 'SKIP : %d\n' "$SKIP_COUNT"
-    printf '\n'
-
-    if (( FAIL_COUNT == 0 )) && systemctl is-active --quiet tor@default.service 2>/dev/null && storage_encrypted; then
-        printf '%s%sSAFE: Traffic is transparently routed through Tor with active hardening.%s\n\n' "$BOLD" "$GREEN" "$RESET"
-        return 0
-    fi
-    printf '%s%sUNSAFE: Critical checks failed, Tor is down, or storage is unencrypted.%s\n\n' "$BOLD" "$RED" "$RESET"
-    return 1
+    print_audit_summary
+    return $?
 }
 
 # =============================================================================
@@ -1855,6 +2265,7 @@ cmd_all()
     step "Starting anonbox Complete Automated Deployment Pipeline"
     detect_network
     show_system_summary
+    preflight_checks
 
     IN_PIPELINE=1
 
@@ -1866,6 +2277,120 @@ cmd_all()
 
     phase_header "3" "3" "Security Audit, Leak Detection & Verification"
     cmd_check
+    return $?
+}
+
+# =============================================================================
+# SUBCOMMAND: doctor (read-only diagnostics; no kill-switch)
+# =============================================================================
+
+cmd_doctor()
+{
+    reset_audit_counters
+    step "anonbox Doctor (read-only; no kill-switch)"
+    detect_network
+
+    if (( DRY_RUN == 1 )); then
+        skip "Doctor dry-run: no live probes"
+        VERDICT="SAFE"
+        LAST_EXIT_CODE=0
+        if (( JSON_OUT == 1 )); then emit_json_report; fi
+        return 0
+    fi
+
+    local tor_active=0
+    if systemctl is-active --quiet tor@default.service 2>/dev/null; then
+        tor_active=1
+        pass "Tor service is active"
+    else
+        fail_fix "Tor service is not active" \
+            "sudo systemctl start tor@default; or sudo ./anonbox setup" "tor" "leak"
+    fi
+
+    local nft_active
+    nft_active="$(systemctl is-active nftables 2>/dev/null || echo inactive)"
+    if [[ "$nft_active" == "active" ]]; then
+        pass "nftables service is active"
+    else
+        fail_fix "nftables service is $nft_active" \
+            "sudo ./anonbox setup" "nft" "leak"
+    fi
+
+    if command -v nft >/dev/null 2>&1; then
+        local tables_active
+        tables_active="$(nft list tables 2>/dev/null || true)"
+        if [[ "$tables_active" == *"tor_nat"* && "$tables_active" == *"tor_filter"* ]]; then
+            pass "Live tor_nat/tor_filter tables present"
+        else
+            fail_fix "tor_nat/tor_filter tables missing" \
+                "sudo ./anonbox setup" "nft" "leak"
+        fi
+    fi
+
+    warn_iface_ip_drift
+    local configured_tp live_tp
+    configured_tp="$(torrc_transport_nic_ip)"
+    live_tp="$(ss_transport_nic_ip)"
+    if [[ -n "$IFACE_IP" && -n "$configured_tp" && "$configured_tp" != "$IFACE_IP" ]]; then
+        fail_fix "IFACE_IP drift vs torrc TransPort" \
+            "sudo ./anonbox setup" "iface-drift" "leak"
+    elif [[ -n "$IFACE_IP" && -n "$live_tp" && "$live_tp" != "$IFACE_IP" ]]; then
+        fail_fix "IFACE_IP drift vs live TransPort bind" \
+            "sudo ./anonbox setup" "iface-drift" "leak"
+    elif [[ -n "$IFACE_IP" ]]; then
+        pass "Primary IPv4 ${IFACE_IP} looks consistent with TransPort binds"
+    fi
+
+    if storage_encrypted; then
+        pass "Encrypted storage detected (LUKS/eCryptfs)"
+    else
+        fail_fix "No LUKS/eCryptfs detected" \
+            "Use LUKS at install time for SAFE" "luks" "harden"
+    fi
+
+    if swap_is_insecure; then
+        fail_fix "Unencrypted swap is active" \
+            "swapon --show; sudo swapoff -a and comment swap in /etc/fstab, or use LUKS/zram" "swap" "harden"
+    else
+        pass "Swap disabled or encrypted/zram"
+    fi
+
+    if [[ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}" ]] && (( ALLOW_SSH == 0 )); then
+        warn "SSH session without --allow-ssh: reboot may lock out remote access"
+    else
+        pass "No SSH lockout risk detected for this session (or --allow-ssh set)"
+    fi
+
+    local aa_denied_all aa_denied_live aa_marker_epoch=""
+    if command -v aa-status >/dev/null 2>&1 && aa-status --enabled 2>/dev/null; then
+        pass "AppArmor enabled"
+    else
+        warn "AppArmor not verified/active"
+    fi
+    aa_denied_all="$(journalctl -b -k --no-pager 2>/dev/null | grep -E 'apparmor="DENIED"' | grep -Ei 'comm="tor"|/usr/bin/tor|profile="system_tor"' || true)"
+    if [[ -f "$APPARMOR_APPLIED_AT" ]]; then
+        aa_marker_epoch="$(tr -d '[:space:]' < "$APPARMOR_APPLIED_AT" 2>/dev/null || true)"
+    fi
+    if [[ -n "$aa_marker_epoch" && "$aa_marker_epoch" =~ ^[0-9]+$ ]]; then
+        aa_denied_live="$(journalctl -b -k --since="@${aa_marker_epoch}" --no-pager 2>/dev/null | grep -E 'apparmor="DENIED"' | grep -Ei 'comm="tor"|/usr/bin/tor|profile="system_tor"' || true)"
+        if [[ -n "$aa_denied_live" ]]; then
+            fail_fix "Live AppArmor DENIED for Tor after profile apply" \
+                "sudo ./anonbox harden; journalctl -b -k | grep DENIED" "apparmor" "harden"
+        elif [[ -n "$aa_denied_all" ]]; then
+            warn "Stale AppArmor DENIED earlier this boot; reboot then re-check"
+        else
+            pass "No Tor AppArmor DENIED this boot"
+        fi
+    elif [[ -n "$aa_denied_all" ]]; then
+        warn "AppArmor DENIED without apparmor-applied.at; re-run harden"
+        REMEDIATIONS+=("apparmor|sudo ./anonbox harden && sudo reboot")
+    else
+        pass "No Tor AppArmor DENIED this boot"
+    fi
+
+    info "Doctor does not run kill-switch or live leak curls; use: sudo ./anonbox check"
+    print_audit_summary
+    return $?
 }
 
 # =============================================================================
@@ -1880,6 +2405,27 @@ cmd_status()
     is_active="$(systemctl is-active tor@default 2>/dev/null || echo 'inactive')"
     local nft_active
     nft_active="$(systemctl is-active nftables 2>/dev/null || echo 'inactive')"
+
+    if (( JSON_OUT == 1 )); then
+        local tor_json="false"
+        [[ "$is_active" == "active" ]] && tor_json="true"
+        LAST_EXIT_CODE=0
+        VERDICT="OK"
+        if [[ "$is_active" != "active" ]]; then
+            VERDICT="DEGRADED"
+            LAST_EXIT_CODE=1
+        fi
+        printf '{'
+        printf '"version":"%s",' "$(json_escape "$VERSION")"
+        printf '"verdict":"%s",' "$(json_escape "$VERDICT")"
+        printf '"exit_code":%d,' "$LAST_EXIT_CODE"
+        printf '"counts":{"pass":0,"warn":0,"fail":0,"skip":0,"leak_fail":0},'
+        printf '"failures":[],"warnings":[],"remediations":[],'
+        printf '"network":{"iface":"%s","iface_ip":"%s","tor_active":%s,"nftables":"%s"}' \
+            "$(json_escape "${IFACE:-}")" "$(json_escape "${IFACE_IP:-}")" "$tor_json" "$(json_escape "$nft_active")"
+        printf '}\n'
+        return "$LAST_EXIT_CODE"
+    fi
 
     info "Tor Service Status    : $is_active"
     info "nftables Firewall     : $nft_active"
@@ -1944,6 +2490,7 @@ cmd_status()
 cmd_rollback()
 {
     require_root
+    confirm_or_die "Confirm rollback (type 'yes' to restore a snapshot)" "yes"
     step "Available Backups in $BACKUP_DIR"
     if [[ ! -d "$BACKUP_DIR" ]]; then
         die "No backups directory found at $BACKUP_DIR"
@@ -2006,6 +2553,7 @@ cmd_rollback()
 cmd_uninstall()
 {
     require_root
+    confirm_or_die "Confirm uninstall (type 'uninstall' to restore clearnet from first snapshot)" "uninstall"
     step "Uninstalling anonbox Configuration (Restoring standard networking)"
     detect_network
 
@@ -2083,11 +2631,13 @@ anonbox Toolkit v${VERSION} — Self-Hosted Hardened Tor Workstation for Debian 
 
 Usage:
   sudo ./anonbox <command> [options]
+  ./anonbox <command> --help
 
 Commands:
   setup       Install packages, configure torrc, bridges, nftables, and fail-closed routing
   harden      Apply comprehensive OS, kernel (Yama, sysctl, GRUB), user, and filesystem hardening
   check       Run the leak-detection and hardening audit (kill-switch, LUKS, AppArmor)
+  doctor      Read-only diagnostics with Fix hints (no kill-switch, no live leak curls)
   all         Execute full pipeline: setup -> harden -> check
   status      Show current Tor connection health, circuits, and public exit IP
   rollback    Restore a snapshot from /var/backups/anonbox/ (--snapshot ID or interactive)
@@ -2095,35 +2645,126 @@ Commands:
   version     Display version information
   help        Show this help message
 
-Options:
-  --bridges-file FILE   Specify path to file containing obfs4 bridge lines
-  --no-bridges          Configure Tor without bridges (direct connection)
+Global options:
   --iface IFACE         Force specific network interface (e.g. enp0s1, eth0)
-  --snapshot ID         Snapshot directory name under /var/backups/anonbox/ (rollback)
-  --allow-ssh           Allow inbound SSH from RFC1918 (required for remote setup/testing)
   --verbose, -v         Enable detailed output and command tracing
   --dry-run             Preview actions without making system changes
+  --yes, -y             Assume yes for prompts (SSH preflight, uninstall/rollback)
+  --quiet, -q           Suppress step output; print summary (and Next steps) only
+  --json                Machine-readable report (check, doctor, status)
+  --no-color            Disable ANSI colors (also respects NO_COLOR=1)
+  --log-file PATH       Session log path (default under /var/log/anonbox/ when root)
+  --no-log              Disable session logging
+
+Command-specific options:
+  --bridges-file FILE   setup/all: path to Bridge lines
+  --no-bridges          setup/all: configure Tor without bridges
+  --allow-ssh           setup/all: allow inbound SSH from RFC1918
+  --no-kill-switch      check: skip Tor-down leak test (not for release gate)
+  --snapshot ID         rollback: snapshot directory under /var/backups/anonbox/
+
+Exit codes (check/doctor/all):
+  0  SAFE
+  1  Leak/network/Tor failure
+  2  Hardening/storage/AppArmor failure only
 
 Examples:
-  sudo ./anonbox all --allow-ssh
-  sudo ./anonbox setup --bridges-file bridges.txt
-  sudo ./anonbox harden --verbose
-  sudo ./anonbox check
   sudo ./anonbox all --bridges-file bridges.txt
+  sudo ./anonbox check --no-kill-switch
+  sudo ./anonbox doctor
+  sudo ./anonbox check --json --quiet
+  sudo ./anonbox uninstall --yes
 EOF
+}
+
+show_command_help()
+{
+    local cmd="$1"
+    case "$cmd" in
+        setup)
+            cat << EOF
+anonbox setup — Tor transparent proxy, nftables, DNS
+
+Usage: sudo ./anonbox setup [options]
+Options: --bridges-file FILE | --no-bridges | --allow-ssh | --iface IFACE
+         --yes | --verbose | --dry-run | --quiet | --no-color | --log-file PATH | --no-log
+EOF
+            ;;
+        harden)
+            cat << EOF
+anonbox harden — OS/kernel/session hardening
+
+Usage: sudo ./anonbox harden [options]
+Options: --iface IFACE | --yes | --verbose | --dry-run | --quiet | --no-color | --log-file PATH | --no-log
+EOF
+            ;;
+        check)
+            cat << EOF
+anonbox check — Leak detection and hardening audit
+
+Usage: sudo ./anonbox check [options]
+Options: --no-kill-switch | --json | --quiet | --iface IFACE
+         --verbose | --dry-run | --no-color | --log-file PATH | --no-log
+
+Release gate: run without --no-kill-switch.
+Exit codes: 0=SAFE, 1=leak/network, 2=hardening/storage.
+EOF
+            ;;
+        doctor)
+            cat << EOF
+anonbox doctor — Read-only diagnostics (no kill-switch)
+
+Usage: sudo ./anonbox doctor [options]
+Options: --json | --quiet | --iface IFACE | --allow-ssh (affects SSH risk WARN only)
+         --verbose | --dry-run | --no-color | --log-file PATH | --no-log
+EOF
+            ;;
+        all)
+            cat << EOF
+anonbox all — setup -> harden -> check
+
+Usage: sudo ./anonbox all [options]
+Options: --bridges-file FILE | --no-bridges | --allow-ssh | --iface IFACE
+         --yes | --verbose | --dry-run | --quiet | --json | --no-color | --log-file PATH | --no-log
+         --no-kill-switch (passed through to final check)
+EOF
+            ;;
+        status)
+            cat << EOF
+anonbox status — Tor/nftables operational status
+
+Usage: ./anonbox status [options]
+Options: --json | --iface IFACE | --verbose | --quiet | --no-color
+EOF
+            ;;
+        rollback)
+            cat << EOF
+anonbox rollback — Restore a configuration snapshot
+
+Usage: sudo ./anonbox rollback [--snapshot ID] [--yes]
+Interactive selection when TTY and no --snapshot.
+EOF
+            ;;
+        uninstall)
+            cat << EOF
+anonbox uninstall — Restore clearnet from first/oldest snapshot
+
+Usage: sudo ./anonbox uninstall [--yes]
+Confirmation required: type 'uninstall' (or pass --yes).
+EOF
+            ;;
+        *)
+            show_help
+            ;;
+    esac
 }
 
 # =============================================================================
 # Main Entrypoint
 # =============================================================================
 
-main()
+parse_options()
 {
-    [[ $# -eq 0 ]] && { show_help; exit 0; }
-
-    local command="$1"
-    shift
-
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --bridges-file)
@@ -2149,6 +2790,35 @@ main()
                 ALLOW_SSH=1
                 shift
                 ;;
+            --yes|-y)
+                ASSUME_YES=1
+                shift
+                ;;
+            --no-kill-switch)
+                NO_KILL_SWITCH=1
+                shift
+                ;;
+            --quiet|-q)
+                QUIET=1
+                shift
+                ;;
+            --json)
+                JSON_OUT=1
+                shift
+                ;;
+            --no-color)
+                NO_COLOR_FLAG=1
+                shift
+                ;;
+            --log-file)
+                [[ $# -lt 2 ]] && die "--log-file requires a PATH argument"
+                LOG_FILE="$2"
+                shift 2
+                ;;
+            --no-log)
+                NO_LOG=1
+                shift
+                ;;
             --verbose|-v)
                 VERBOSE=1
                 shift
@@ -2158,25 +2828,52 @@ main()
                 shift
                 ;;
             --help|-h)
-                show_help
-                exit 0
+                HELP_TOPIC=1
+                shift
                 ;;
             *)
                 die "Unknown option: $1 (see: ./anonbox help)"
                 ;;
         esac
     done
+}
+
+main()
+{
+    [[ $# -eq 0 ]] && { show_help; exit 0; }
+
+    local command="$1"
+    shift
+
+    parse_options "$@"
+
+    init_colors
+
+    if [[ "$command" == "help" || "$command" == "-h" ]]; then
+        show_help
+        exit 0
+    fi
+    if (( HELP_TOPIC == 1 )); then
+        show_command_help "$command"
+        exit 0
+    fi
+
+    case "$command" in
+        setup|harden|check|doctor|all|rollback|uninstall)
+            start_session_log
+            ;;
+    esac
 
     case "$command" in
         setup)      cmd_setup ;;
         harden)     cmd_harden ;;
-        check)      cmd_check ;;
-        all)        cmd_all ;;
-        status)     cmd_status ;;
+        check)      cmd_check; return $? ;;
+        doctor)     cmd_doctor; return $? ;;
+        all)        cmd_all; return $? ;;
+        status)     cmd_status; return $? ;;
         rollback)   cmd_rollback ;;
         uninstall)  cmd_uninstall ;;
         version)    printf 'anonbox v%s\n' "$VERSION" ;;
-        help|-h)    show_help ;;
         *)          die "Unknown command: $command (run './anonbox help' for available commands)" ;;
     esac
 }
