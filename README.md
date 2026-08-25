@@ -96,7 +96,7 @@ flowchart TD
             Tor_TransPort --> Tor_Core["Tor Core Daemon (uid: debian-tor)"]
             Tor_DNSPort --> Tor_Core
             
-            Tor_Core -->|obfs4 / WebTunnel / Snowflake (if installed) / Direct| Tor_Outbound["Encrypted Tor Traffic"]
+            Tor_Core -->|"obfs4 / WebTunnel / Snowflake if installed / Direct"| Tor_Outbound["Encrypted Tor Traffic"]
         end
         
         Tor_Outbound --> NAT_Adapter["Virtual NAT Adapter"]
