@@ -74,6 +74,7 @@ grep -q '::group::' ./anonbox || fail "GitHub Actions ::group:: missing"
 grep -q 'Exit code: %d (0=SAFE, 1=leak/network, 2=hardening/storage)' ./anonbox || fail "exit code legend missing"
 grep -q '\[PHASE' ./anonbox || fail "PHASE banners missing (English UI)"
 [[ -f ./completions/anonbox.bash ]] || fail "completions/anonbox.bash missing"
+grep -q 'Dedicated Debian guest VM recommended' ./anonbox || fail "VM-only preflight warn missing"
 pass "CLI UX asserts"
 
 # Audit remediation helpers (path jail, bridges allowlist, kill-switch, restore)

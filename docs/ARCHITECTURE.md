@@ -1,17 +1,17 @@
 # Software Design Document & System Architecture
 
-## Self-Hosted Anonymous Operating System in a Virtual Machine (`anonbox`)
+## Self-Hosted Fail-Closed Tor Workstation Toolkit (`anonbox`)
 
 * **Document:** `docs/ARCHITECTURE.md`
 * **Target Operating System:** Debian GNU/Linux 12 (Bookworm) and 13 (Trixie) [ARM64 / x86_64]
 * **Target Hypervisors:** UTM (Apple Silicon / macOS), VirtualBox, KVM / QEMU
-* **Status:** Hardening toolkit / v1.2 candidate — nft redirect + NIC TransPort (INPUT-mitigated), AppArmor fail-hard, fail-closed
+* **Status:** Hardening toolkit / v1.2 — dedicated Debian **guest VM** only; nft redirect + NIC TransPort (INPUT-mitigated); AppArmor fail-hard; fail-closed. **Not** Tails amnesia or Whonix dual-VM.
 
 ---
 
 ## 1. System Overview & Philosophy
 
-The objective of `anonbox` is to transform a standard minimal installation of Debian GNU/Linux (12 or 13) into an isolated, hardened, fail-closed anonymous virtual workstation. All non-local network traffic (TCP and DNS) is strictly routed through the Tor network, while non-Tor egress (IPv6, raw UDP, ICMP) is destroyed at the kernel level.
+The objective of `anonbox` is to transform a standard minimal installation of Debian GNU/Linux (12 or 13) **in a dedicated guest VM** into an isolated, hardened, fail-closed anonymous virtual workstation. All non-local network traffic (TCP and DNS) is strictly routed through the Tor network, while non-Tor egress (IPv6, raw UDP, ICMP) is destroyed at the kernel level. Persistence is intentional; disk encryption is **user-provided** at install time (see §5). Do not run this toolkit on a daily host OS.
 
 ### 1.1. Core Architectural Flow
 
@@ -166,10 +166,15 @@ For operation in heavily filtered networks (such as state-level DPI firewalls), 
 
 ---
 
-## 5. Storage Encryption (required for SAFE)
+## 5. Storage Encryption (user-provided; required for SAFE)
 
 > [!IMPORTANT]
-> Because `anonbox` is a persistent virtual workstation rather than a RAM-only Live ISO (like Tails), **encrypted storage (LUKS2 full-disk or eCryptfs)** is required for `anonbox check` to report **SAFE** (`FAIL` if missing). Setup itself does **not** abort without encryption — lab VMs may lack LUKS — but at-rest disk images remain readable without a passphrase. Prefer LUKS2 during Debian install for production use.
+> `anonbox` is a **persistent** virtual workstation (not a RAM-only Live ISO like Tails). **Disk encryption is your responsibility** at Debian install time — the toolkit does **not** set up LUKS/eCryptfs.
+>
+> - The script **runs without** encryption (setup does not abort).
+> - **Keep data** on the VM → enable LUKS2 (preferred) or eCryptfs (**recommended**).
+> - **Throwaway** / discard disk / revert [hypervisor snapshot](HYPERVISORS.md) → encryption optional.
+> - `anonbox check` reports **SAFE** only when LUKS or eCryptfs is detected (`FAIL` if missing). Without a passphrase, cleartext disk images on the host remain readable.
 
 ## 6. IFACE_IP / TransPort drift
 

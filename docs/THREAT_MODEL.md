@@ -1,10 +1,21 @@
 # Threat Model & Security Boundaries
 
+## 0. Product scope & deployment assumptions
+
+`anonbox` is a **small toolkit** that quickly provisions a fail-closed Tor workstation on a **standard Debian 12/13 guest VM**. It is **not** Tails, Whonix, or an amnesic Live OS.
+
+- **Dedicated VM only.** Supported on UTM / VirtualBox / KVM guests. Do **not** run on a daily host or trusted bare metal (lockout risk; host compromise is out of scope).
+- **Persistence is intentional.** Discard sessions with [hypervisor snapshots](HYPERVISORS.md). Amnesia is out of scope.
+- **Disk encryption is user-provided** (Debian install). anonbox does not configure LUKS. The script runs without encryption; keep-data → LUKS/eCryptfs recommended; throwaway → optional; **SAFE** requires encryption (`check` FAIL otherwise).
+- **SSH** closed by default; `--allow-ssh` is lab-only (RFC1918 inbound). Prefer NAT / host-only. Interactive browsing requires **Tor Browser**.
+
+---
+
 ## 1. System Comparison: Tails OS vs Whonix vs anonbox
 
 | Security Vector | Tails OS (Live USB) | Whonix (2 VMs: Gateway + WS) | anonbox (This Project) | Design Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **Storage Encryption** | LUKS (Persistent Volume) | Optional inside VM | **LUKS2 / eCryptfs (required for SAFE)** | **IN-SCOPE (check FAIL blocks SAFE)** |
+| **Storage Encryption** | LUKS (Persistent Volume) | Optional inside VM | **User-provided LUKS2 / eCryptfs (required for SAFE; optional for disposable lab)** | **IN-SCOPE (check FAIL blocks SAFE)** |
 | **Tor Routing** | iptables/nftables | Hypervisor-isolated Gateway | **Local Fail-Closed nftables** | **IN-SCOPE (Mandatory)** |
 | **Kill-Switch on Crash** | Yes | Yes | **Yes (nftables drop policy)** | **IN-SCOPE (Mandatory)** |
 | **DNS / UDP Leak Drop** | Yes | Yes | **Yes (Kernel drop + local DNSPort)** | **IN-SCOPE (Mandatory)** |
@@ -29,7 +40,7 @@
 3. **Local Process Snooping:** Unprivileged non-sudo users cannot snoop on `/proc` PIDs (`hidepid=2,gid=sudo`), inject via `ptrace` (`ptrace_scope=2`), or read other users' files (`umask 027`, `/home/` 700). Operators in `sudo` still see all PIDs.
 4. **Time & Location Fingerprinting:** System clock is set to UTC and synchronized anonymously over Tor using `htpdate`, eliminating standard unencrypted NTP UDP leaks.
 5. **Machine-ID & Telemetry Correlation:** Standardized `/etc/machine-id`, purged `popularity-contest`, and disabled NetworkManager connectivity checks eliminate OS-level tracking tokens.
-6. **Disk Forensics when Powered Off:** LUKS2 or eCryptfs keeps disk image files (`.qcow2`, `.vdi`) unreadable without the passphrase. Without encryption, `check` reports FAIL and SAFE is blocked (setup does not abort).
+6. **Disk Forensics when Powered Off:** If the user enabled LUKS2 or eCryptfs at install time, disk image files (`.qcow2`, `.vdi`) stay unreadable without the passphrase. Without encryption, `check` reports FAIL and SAFE is blocked (setup does not abort). Throwaway VMs that discard the disk or revert snapshots may omit encryption by design.
 
 ### Out-of-Scope (Known Limitations)
 

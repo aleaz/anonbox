@@ -724,6 +724,9 @@ swap_is_insecure()
 
 preflight_checks()
 {
+    # Product scope: dedicated guest VM only (not a hard die — detection is unreliable).
+    warn "Dedicated Debian guest VM recommended. Do not run anonbox on your daily host or bare metal (see SECURITY.md / README)."
+
     if [[ -n "$BRIDGES_FILE" && "$NO_BRIDGES" -eq 1 ]]; then
         die "Conflicting options: --bridges-file and --no-bridges cannot be used together."
     fi
@@ -744,7 +747,7 @@ preflight_checks()
     fi
 
     if ! storage_encrypted; then
-        warn "No LUKS/eCryptfs detected; SAFE verdict will be blocked until encrypted storage is present."
+        warn "No LUKS/eCryptfs detected (user-provided at install). Script still runs; SAFE is blocked until encrypted storage is present (optional for throwaway VMs)."
     fi
 }
 

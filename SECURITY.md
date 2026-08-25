@@ -34,9 +34,26 @@ To help us triage and resolve the issue quickly, please provide:
 
 ---
 
-## Security Boundaries & Model
+## Product scope
 
-`anonbox` is a **single-VM fail-closed Tor workstation toolkit** for Debian (hardening candidate), not Tails or Whonix. Please review [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for established security boundaries:
+`anonbox` is a **small Debian toolkit** (one main script + docs): it quickly turns a **standard Debian 12/13 guest VM** into a fail-closed Tor workstation for browsing and general use. It is **not** Tails, Whonix, an amnesic Live OS, or a new anonymous operating system. Value is packaged defaults, hardening, and an audit CLI—not a replacement OS.
+
+### Supported vs unsupported deployment
+
+| | |
+| :--- | :--- |
+| **Supported** | Dedicated guest VM (UTM, VirtualBox, KVM/QEMU). Prefer hypervisor [NAT / host-only](docs/HYPERVISORS.md) and console admin. |
+| **Unsupported / dangerous** | Daily host OS, trusted bare metal, or any machine you need for normal clearnet work. Hardening closes inbound access by default and can lock you out; if the host is compromised, the guest is too ([threat model](docs/THREAT_MODEL.md)). |
+
+### Persistence, encryption, and SSH
+
+- **Persistence is intentional.** Reuse the guest. Amnesia (RAM-only rootfs) is out of scope. For disposable sessions, revert a [hypervisor snapshot](docs/HYPERVISORS.md).
+- **Disk encryption is user-provided** at Debian install time. anonbox does **not** set up LUKS/eCryptfs. The script **runs without** encryption. If you **keep data** on the VM, enable encryption (**recommended**). Throwaway / discard-disk / revert-snapshot → optional. `anonbox check` reports **SAFE** only when LUKS or eCryptfs is present (otherwise storage **FAIL**).
+- **SSH** is closed by default (hypervisor console preferred). Optional lab: `--allow-ssh` accepts inbound TCP/22 from RFC1918 only. Prefer NAT + port-forward or host-only—not an open bridged LAN. Lab SSH is not a max-anonymity posture.
+
+### Security boundaries
+
+Please review [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for established security boundaries:
 
 - **In-Scope:** Transparent TCP/DNS Tor routing, fail-closed kill-switch, DNS/UDP/ICMP/IPv6 leak prevention, OS hardening, stream isolation.
 - **Residuals:** First `apt`/`git` install over clearnet; TransPort/DNSPort bind on NIC IP (mitigated by nft INPUT drop); MAC cloning under hypervisor NAT is not L2 anti-fingerprint.

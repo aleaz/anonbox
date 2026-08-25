@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-25
+
 ### Security
 
 - Path jail for `--snapshot` (`resolve_snapshot_dir` / `resolve_under_dir`); reject `..` and symlinks.
@@ -24,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Exit codes for `check`/`doctor`/`all`: `0` SAFE, `1` leak/network/Tor, `2` hardening/storage only.
 - AppArmor apply marker `/var/lib/anonbox/apparmor-applied.at`; `check` FAILs only on DENIED after marker (stale boot denials → WARN).
 - `doctor` read-only diagnostics (no kill-switch); `check --no-kill-switch` for frequent audits (release gate still requires full check).
-- Preflight on `setup`/`all`: bridges validation, SSH lockout prompt, swap/LUKS warnings; `--yes`/`-y` skips prompts.
+- Preflight on `setup`/`all`: VM-only warn, bridges validation, SSH lockout prompt, swap/LUKS warnings; `--yes`/`-y` skips prompts.
 - Destructive confirmations for `uninstall`/`rollback` (type `uninstall`/`yes`, or `--yes`).
 - Output flags: `--quiet`/`-q`/`--silent`, `--json` (check/doctor/status), `--color=auto|always|never`, `--no-color` / `NO_COLOR` / `TERM=dumb` / `FORCE_COLOR`, session log under `/var/log/anonbox/` (`--log-file` / `--no-log`).
 - Human CLI UX (stderr): `log_*` helpers, TTY bootstrap `\r` bar, kv tables (`status`), result cards (`setup`/`harden`/`uninstall`/`rollback`), `==> [n/N]` phase lines, GitHub Actions `::group::` phases. `--quiet` still prints FAIL/WARN + the result card; PASS is hidden unless `--verbose` (or inside a CI group). Audit summary lists **Failures** and **Warnings**.
@@ -50,7 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Version **1.2.0** candidate. Status: hardening toolkit (not Tails/Whonix).
+- Version **1.2.0**. Status: hardening toolkit (not Tails/Whonix).
+- **Product scope docs:** dedicated guest VM disclaimer; persistence intentional (not amnesia); user-provided LUKS/eCryptfs (runs without it; recommended if keeping data; required for SAFE); SSH lab off by default with NAT/host-only guidance ([SECURITY.md](SECURITY.md), README, threat model, architecture, hypervisors).
 - Docs: LUKS/eCryptfs required for SAFE (`check` FAIL), not a setup hard die; acceptance matrix tied to SAFE = FAIL_COUNT==0 + Tor + encrypted.
 - `torrc` is `chmod 640` `root:debian-tor`. Snowflake only if `snowflake-client` exists. Optional `torbrowser-launcher` when packaged.
 - nftables unit override: `After=systemd-modules-load.service sysinit.target` plus `Before=network-pre.target`.

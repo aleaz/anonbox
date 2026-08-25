@@ -2,9 +2,9 @@
 
 # 🧅 Anonbox
 
-## *Turn any Debian VM into an isolated, fail-closed, hardened Tor workstation.*
+## *A small toolkit that quickly turns a standard Debian guest VM into a fail-closed Tor workstation.*
 
-[![Release](https://img.shields.io/badge/release-v1.2.0-candidate-7D4698.svg?style=flat-square&logo=github)](https://github.com/aleaz/anonbox/releases)
+[![Release](https://img.shields.io/badge/release-v1.2.0-7D4698.svg?style=flat-square&logo=github)](https://github.com/aleaz/anonbox/releases)
 [![Debian: 12 | 13](https://img.shields.io/badge/Debian-12%20(Bookworm)%20%7C%2013%20(Trixie)-D70A53.svg?style=flat-square&logo=debian&logoColor=white)](https://www.debian.org/)
 [![Tor: Transparent Proxy](https://img.shields.io/badge/Tor-Transparent%20Proxy-7D4698.svg?style=flat-square&logo=torproject&logoColor=white)](https://www.torproject.org/)
 [![Hardening: KSPP & Tails](https://img.shields.io/badge/Hardening-KSPP%20%7C%20Tails%20Standard-success.svg?style=flat-square&logo=linux&logoColor=white)](docs/ARCHITECTURE.md)
@@ -27,14 +27,27 @@
 | **Architecture** | `ARM64` (Apple Silicon UTM) and `x86_64` (VirtualBox, KVM, Proxmox) |
 | **Traffic Policy** | 100% Fail-Closed routing through Tor (`nftables` priority drop) |
 | **Security Standards** | KSPP (Kernel Self Protection), Tails OS & Whonix Hardening Patterns |
-| **Storage Security** | LUKS2 / eCryptfs **required for SAFE** (`check` FAILs without it; lab VMs may lack LUKS) |
+| **Storage Security** | User-provided LUKS2 / eCryptfs; **required for SAFE**, optional for disposable lab |
+| **Deployment** | Dedicated Debian **guest VM** only (not your daily host / bare metal) |
+
+> [!WARNING]
+> **Dedicated VM only.** Run `anonbox` inside a guest (UTM / VirtualBox / KVM). **Do not** run it on your daily host or trusted bare metal: hardening closes inbound access by default, can lock you out, and a compromised host defeats the guest (see [SECURITY.md](SECURITY.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)).
+
+> [!IMPORTANT]
+> **What this is:** a small Debian toolkit (one main script + docs) that quickly provisions a fail-closed Tor workstation on a **standard Debian 12/13 VM**. It is **not** Tails, Whonix, an amnesic Live OS, or a new anonymous operating system. Persistence is intentional; discard sessions via [hypervisor snapshots](docs/HYPERVISORS.md).
+>
+> **Disk encryption:** you enable LUKS/eCryptfs at Debian install time — anonbox does **not** set it up. The script **runs without** encryption. Keep data on the VM → encryption **recommended**. Throwaway / revert-snapshot → optional. `anonbox check` reports **SAFE** only with encryption present.
+>
+> **SSH:** closed by default (use the hypervisor console). Lab only: `sudo ./anonbox all --allow-ssh` (RFC1918 inbound). Prefer NAT / host-only, not an open bridged LAN.
+>
+> **Prerequisites:** Clean minimal **Debian 12 or 13** guest. Interactive browsing needs **Tor Browser** (`torbrowser-launcher` when packaged). Transparent proxy does not replace browser anti-fingerprint.
 
 ## Quickstart
 
-Get a hardened anonymous workstation running in under 2 minutes:
+Run this **only inside a dedicated Debian VM**. Provision a fail-closed Tor workstation in under 2 minutes:
 
 ```bash
-# 1. Clone the repository inside your clean Debian VM
+# 1. Clone inside your clean Debian guest VM (not the host OS)
 # NOTE: this step and the first apt install run over CLEARNET (ISP sees packages).
 # Prefer a preseeded/offline image when that residual matters (see docs/THREAT_MODEL.md).
 git clone https://github.com/aleaz/anonbox.git
@@ -52,17 +65,12 @@ sudo ./anonbox all
 sudo reboot
 ```
 
-> [!IMPORTANT]
-> **Prerequisites:** Clean minimal installation of **Debian 12 or 13**. **LUKS Full-Disk Encryption** is required for `check` to report **SAFE** (lab VMs without LUKS will FAIL storage checks by design).
->
-> **Product status:** Hardening toolkit / v1.2 **candidate** — not Tails/Whonix. Interactive browsing needs **Tor Browser** (`torbrowser-launcher` when packaged).
-
 ## Why Anonbox?
 
 | Security Vector | Tails OS (Live USB) | Whonix (2 VMs: Gateway + WS) | Anonbox (This Project) |
 | :--- | :--- | :--- | :--- |
-| **Deployment Model** | Ephemeral Live USB | 2 Dedicated VMs (Heavy RAM) | **Single Hardened VM (Lightweight)** |
-| **Persistence** | Limited to USB Volume | VM Disk Images | **LUKS2 / eCryptfs Encrypted Persistence** |
+| **Deployment Model** | Ephemeral Live USB | 2 Dedicated VMs (Heavy RAM) | **Single hardened guest VM (toolkit / script)** |
+| **Persistence** | Limited to USB Volume | VM Disk Images | **Persistent by design** (encrypt if you enable LUKS; **not** amnesia) |
 | **Tor Routing** | iptables/nftables | Hypervisor-isolated Gateway | **Local Fail-Closed nftables Kill-Switch** |
 | **Leak Prevention** | Blocked | Blocked | **Kernel-Level Drop (UDP, ICMP, IPv6)** |
 | **Stream Isolation** | Per application | Per SocksPort | **Multi-Port Isolation (9050, 9051, 9052)** |
