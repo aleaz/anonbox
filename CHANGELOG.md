@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-08-25
+
 ### Fixed
 
 - README/ARCHITECTURE Mermaid edge label: drop parentheses and quote PT path so GitHub renders the System Architecture diagram.
+
+### Changed
+
+- Version **1.2.2**.
 
 ## [1.2.1] - 2026-08-25
 

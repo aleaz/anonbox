@@ -4,7 +4,7 @@
 
 ## *A small toolkit that quickly turns a standard Debian guest VM into a fail-closed Tor workstation.*
 
-[![Release](https://img.shields.io/badge/release-v1.2.1-7D4698.svg?style=flat-square&logo=github)](https://github.com/aleaz/anonbox/releases)
+[![Release](https://img.shields.io/badge/release-v1.2.2-7D4698.svg?style=flat-square&logo=github)](https://github.com/aleaz/anonbox/releases)
 [![Debian: 12 | 13](https://img.shields.io/badge/Debian-12%20(Bookworm)%20%7C%2013%20(Trixie)-D70A53.svg?style=flat-square&logo=debian&logoColor=white)](https://www.debian.org/)
 [![Tor: Transparent Proxy](https://img.shields.io/badge/Tor-Transparent%20Proxy-7D4698.svg?style=flat-square&logo=torproject&logoColor=white)](https://www.torproject.org/)
 [![Hardening: KSPP & Tails](https://img.shields.io/badge/Hardening-KSPP%20%7C%20Tails%20Standard-success.svg?style=flat-square&logo=linux&logoColor=white)](docs/ARCHITECTURE.md)
