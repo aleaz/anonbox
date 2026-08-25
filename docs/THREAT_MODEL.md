@@ -7,7 +7,7 @@
 - **Dedicated VM only.** Supported on UTM / VirtualBox / KVM guests. Do **not** run on a daily host or trusted bare metal (lockout risk; host compromise is out of scope).
 - **Persistence is intentional.** Discard sessions with [hypervisor snapshots](HYPERVISORS.md). Amnesia is out of scope.
 - **Disk encryption is user-provided** (Debian install). anonbox does not configure LUKS. The script runs without encryption; keep-data → LUKS/eCryptfs recommended; throwaway → optional; **SAFE** requires encryption (`check` FAIL otherwise).
-- **SSH** closed by default; `--allow-ssh` is lab-only (RFC1918 inbound). Prefer NAT / host-only. Interactive browsing requires **Tor Browser**.
+- **SSH** closed by default; `--allow-ssh` is lab-only (RFC1918 inbound, persisted in `/etc/nftables.conf` across reboot; cleared if setup runs without the flag). Prefer NAT / host-only. Interactive browsing requires **Tor Browser**.
 
 ---
 

@@ -49,7 +49,7 @@ To help us triage and resolve the issue quickly, please provide:
 
 - **Persistence is intentional.** Reuse the guest. Amnesia (RAM-only rootfs) is out of scope. For disposable sessions, revert a [hypervisor snapshot](docs/HYPERVISORS.md).
 - **Disk encryption is user-provided** at Debian install time. anonbox does **not** set up LUKS/eCryptfs. The script **runs without** encryption. If you **keep data** on the VM, enable encryption (**recommended**). Throwaway / discard-disk / revert-snapshot → optional. `anonbox check` reports **SAFE** only when LUKS or eCryptfs is present (otherwise storage **FAIL**).
-- **SSH** is closed by default (hypervisor console preferred). Optional lab: `--allow-ssh` accepts inbound TCP/22 from RFC1918 only. Prefer NAT + port-forward or host-only—not an open bridged LAN. Lab SSH is not a max-anonymity posture.
+- **SSH** is closed by default (hypervisor console preferred). Optional lab: `--allow-ssh` accepts inbound TCP/22 from RFC1918 only; the rule is written to `/etc/nftables.conf` and **persists across reboot**. Re-running `setup`/`all` without `--allow-ssh` regenerates the firewall **without** that rule. Prefer NAT + port-forward or host-only—not an open bridged LAN. Lab SSH is not a max-anonymity posture.
 
 ### Security boundaries
 

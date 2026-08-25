@@ -79,7 +79,7 @@ Setup asserts live `tor_nat` / `tor_filter` tables after load.
 ### 2.4. LAN Egress Restriction & Administration
 
 * **Zero Outbound RFC 1918 Leak:** New outbound TCP to `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` is not redirected and is dropped in the filter output chain.
-* **No inbound SSH by default:** Administration is via the hypervisor console. INPUT does not accept RFC1918 SSH or ICMP echo (`--allow-ssh` optional for lab).
+* **No inbound SSH by default:** Administration is via the hypervisor console. INPUT does not accept RFC1918 SSH or ICMP echo. Optional lab: `--allow-ssh` injects an RFC1918 `tcp dport 22 accept` into `/etc/nftables.conf` (persists across reboot until setup is re-run without the flag).
 * **Restricted conntrack:** OUTPUT does **not** `accept` `ct state established,related` for arbitrary UIDs. OUTPUT allows loopback, NIC TransPort/DNSPort delivery, `skuid` of the Tor daemon, and DHCP. INPUT accepts loopback plus `established,related`, then drops TransPort/DNSPort, then optional SSH. `conntrack -F` runs after loading rules when safe for SSH.
 * **DHCP Renewal Exemption:** Outbound DHCP lease renewal queries are explicitly allowed on the virtual adapter.
 

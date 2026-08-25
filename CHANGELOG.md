@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: `--allow-ssh` persists in `/etc/nftables.conf` across reboot; re-setup without the flag removes it (README, SECURITY, ARCHITECTURE, THREAT_MODEL).
+
 ## [1.2.2] - 2026-08-25
 
 ### Fixed

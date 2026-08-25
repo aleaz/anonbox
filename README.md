@@ -40,7 +40,7 @@
 >
 > **Disk encryption:** you enable LUKS/eCryptfs at Debian install time — anonbox does **not** set it up. The script **runs without** encryption. Keep data on the VM → encryption **recommended**. Throwaway / revert-snapshot → optional. `anonbox check` reports **SAFE** only with encryption present.
 >
-> **SSH:** closed by default (use the hypervisor console). Lab only: `sudo ./anonbox all --allow-ssh` (RFC1918 inbound). Prefer NAT / host-only, not an open bridged LAN.
+> **SSH:** closed by default (use the hypervisor console). Lab only: `sudo ./anonbox all --allow-ssh` (RFC1918 inbound). That flag writes the accept rule into `/etc/nftables.conf` so it **persists across reboot**; re-running setup **without** `--allow-ssh` removes it. Prefer NAT / host-only, not an open bridged LAN.
 >
 > **Prerequisites:** Clean minimal **Debian 12 or 13** guest. Interactive browsing needs **Tor Browser** (`torbrowser-launcher` when packaged). Transparent proxy does not replace browser anti-fingerprint.
 
