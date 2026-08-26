@@ -27,6 +27,17 @@ pass "torrc generator asserts"
 grep -q 'torrc_transport_nic_ip' ./anonbox || fail "torrc_transport_nic_ip helper missing"
 grep -q 'warn_iface_ip_drift' ./anonbox || fail "warn_iface_ip_drift helper missing"
 grep -q 'IFACE_IP drift' ./anonbox || fail "IFACE_IP drift FAIL in check missing"
+grep -q 'cmd_sync_iface' ./anonbox || fail "cmd_sync_iface missing"
+grep -q 'rewrite_torrc_nic_binds' ./anonbox || fail "rewrite_torrc_nic_binds missing"
+grep -q '99-anonbox-sync-iface' ./anonbox || fail "NM sync dispatcher path missing"
+grep -q 'ANONBOX_INSTALLED_MARKER' ./anonbox || fail "ANONBOX_INSTALLED_MARKER missing"
+grep -q 'install_sync_iface_hook' ./anonbox || fail "install_sync_iface_hook missing"
+grep -q 'remove_sync_iface_hook' ./anonbox || fail "remove_sync_iface_hook missing"
+grep -q 'systemd-run' ./anonbox || fail "systemd-run oneshot enqueue missing"
+# sync-iface must not call full setup
+if awk '/^cmd_sync_iface\(\)/,/^cmd_rollback\(\)|^cmd_uninstall\(\)|^# =====/' ./anonbox | grep -q 'cmd_setup'; then
+  fail "cmd_sync_iface must not call cmd_setup"
+fi
 grep -q 'Preserving existing Bridge lines' ./anonbox || fail "bridge preserve on re-setup missing"
 grep -q 'baseline nftables accept' ./anonbox || fail "uninstall help must mention baseline nftables accept"
 # shellcheck disable=SC2016 # intentional literal "$ANONBOX_TOR_DEFAULTS" in source
@@ -128,6 +139,45 @@ pass "JSON/stderr stream isolation"
 # Per-command help
 ./anonbox check --help 2>&1 | grep -q 'no-kill-switch' || fail "check --help missing --no-kill-switch"
 ./anonbox doctor --help 2>&1 | grep -q 'doctor' || fail "doctor --help broken"
+./anonbox help | grep -q 'sync-iface' || fail "help missing sync-iface"
+./anonbox sync-iface --help 2>&1 | grep -q 'sync-iface' || fail "sync-iface --help broken"
 pass "per-command help"
+
+# torrc NIC bind rewrite selftest (no root / no Tor)
+REWRITE_DIR="$(mktemp -d)"
+trap 'rm -rf "$REWRITE_DIR"' EXIT
+OLD_IP="10.0.0.50"
+NEW_IP="10.0.0.99"
+cat > "$REWRITE_DIR/torrc.in" << EOF
+# test fixture
+TransPort 127.0.0.1:9040 IsolateDestAddr IsolateDestPort
+TransPort ${OLD_IP}:9040 IsolateDestAddr IsolateDestPort
+DNSPort 127.0.0.1:5353
+DNSPort ${OLD_IP}:5353
+SocksPort 127.0.0.1:9050 IsolateDestAddr IsolateDestPort
+UseBridges 1
+Bridge obfs4 1.2.3.4:443 AAAA cert=BBBB iat-mode=0
+EOF
+ANONBOX_REWRITE_SELFTEST=1 ./anonbox "$REWRITE_DIR/torrc.in" "$REWRITE_DIR/torrc.out" "$OLD_IP" "$NEW_IP" \
+  || fail "ANONBOX_REWRITE_SELFTEST rewrite failed"
+grep -Fq "TransPort ${NEW_IP}:9040" "$REWRITE_DIR/torrc.out" || fail "rewrite missing new TransPort"
+grep -Fq "DNSPort ${NEW_IP}:5353" "$REWRITE_DIR/torrc.out" || fail "rewrite missing new DNSPort"
+grep -Fq "TransPort 127.0.0.1:9040" "$REWRITE_DIR/torrc.out" || fail "rewrite dropped loopback TransPort"
+grep -Fq "Bridge obfs4 1.2.3.4:443" "$REWRITE_DIR/torrc.out" || fail "rewrite dropped Bridge line"
+if grep -Fq "TransPort ${OLD_IP}:9040" "$REWRITE_DIR/torrc.out"; then
+  fail "rewrite left old TransPort NIC bind"
+fi
+if grep -E 'TransPort 0\.0\.0\.0|DNSPort 0\.0\.0\.0' "$REWRITE_DIR/torrc.out"; then
+  fail "rewrite introduced 0.0.0.0 bind"
+fi
+pass "torrc NIC rewrite selftest"
+
+# Manual VM checklist (document for PR reviewers; not executed here):
+# 1. sudo ./anonbox setup → marker + dispatcher present
+# 2. Simulate drift → check FAIL iface-drift
+# 3. sudo ./anonbox sync-iface → listeners OK; check clean of iface-drift
+# 4. sync-iface again → noop
+# 5. nmcli connection up / dhcp4-change → journal anonbox-sync-iface; NM not hung
+# 6. sudo ./anonbox uninstall --yes → dispatcher + markers gone
 
 printf '\nAll CI smoke checks passed.\n'

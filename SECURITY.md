@@ -56,5 +56,5 @@ To help us triage and resolve the issue quickly, please provide:
 Please review [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for established security boundaries:
 
 - **In-Scope:** Transparent TCP/DNS Tor routing, fail-closed kill-switch, DNS/UDP/ICMP/IPv6 leak prevention, OS hardening, stream isolation.
-- **Residuals:** First `apt`/`git` install over clearnet; TransPort/DNSPort bind on NIC IP (mitigated by nft INPUT drop); MAC cloning under hypervisor NAT is not L2 anti-fingerprint.
+- **Residuals:** First `apt`/`git` install over clearnet; TransPort/DNSPort bind on NIC IP (mitigated by nft INPUT drop; DHCP drift remediable via `anonbox sync-iface` / NM dispatcher); MAC cloning under hypervisor NAT is not L2 anti-fingerprint.
 - **Out-of-Scope (Known Limits):** Host machine compromise, physical cold-boot RAM attacks, browser fingerprint standardization (use Tor Browser for web browsing), Whonix-style gateway isolation.

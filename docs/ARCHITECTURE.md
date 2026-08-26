@@ -178,4 +178,10 @@ For operation in heavily filtered networks (such as state-level DPI firewalls), 
 
 ## 6. IFACE_IP / TransPort drift
 
-Tor `TransPort`/`DNSPort` bind the NIC primary IPv4 at setup time. If DHCP or hypervisor NAT changes that address, nft `redirect` targets a stale bind. `anonbox check` **FAIL**s when the live primary IPv4 ≠ the TransPort NIC bind in `torrc`/`ss`. `setup`/`harden`/`status` warn to re-run `setup` after IP changes (no NetworkManager dispatcher hook in this release).
+Tor `TransPort`/`DNSPort` bind the NIC primary IPv4 at setup time. If DHCP or hypervisor NAT changes that address, nft `redirect` delivers to the new primary IP while Tor may still listen on the stale bind.
+
+**Remediation:** `sudo ./anonbox sync-iface` rewrites only the NIC `TransPort`/`DNSPort` lines in `/etc/tor/torrc`, runs `tor --verify-config`, restarts `tor@default`, and asserts listeners. It does **not** regenerate nftables or re-run full `setup`.
+
+**Automation:** `setup` installs `/etc/NetworkManager/dispatcher.d/99-anonbox-sync-iface`, which on `up` / `dhcp4-change` for the default-route interface **enqueues** a systemd oneshot (`systemd-run --unit=anonbox-sync-iface.service`) — it must not block NetworkManager. A marker at `/var/lib/anonbox/installed` gates the hook; `uninstall` removes the dispatcher and markers.
+
+**Manual path:** Guests without NetworkManager should run `sync-iface` after IP changes. `anonbox check` **FAIL**s on drift (`iface-drift`) with Fix pointing at `sync-iface` (or `setup` if torrc/nft are missing).

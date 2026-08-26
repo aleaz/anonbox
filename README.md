@@ -145,6 +145,9 @@ sudo ./anonbox doctor
 # Show current Tor connection health, circuits, and public exit IP
 ./anonbox status
 
+# After DHCP / hypervisor IP change: rebind Tor TransPort/DNSPort (no full setup)
+sudo ./anonbox sync-iface
+
 # Rollback configuration to a chosen snapshot (ID: YYYYMMDD_HHMMSS[_PID])
 sudo ./anonbox rollback --snapshot 20260824_120000 --yes
 
@@ -152,7 +155,7 @@ sudo ./anonbox rollback --snapshot 20260824_120000 --yes
 sudo ./anonbox uninstall --yes
 ```
 
-**Exit codes** (`check` / `doctor` / `all`): `0` SAFE, `1` leak/network/Tor failure, `2` hardening/storage only.
+**Exit codes** (`check` / `doctor` / `all`): `0` SAFE, `1` leak/network/Tor failure, `2` hardening/storage only. `sync-iface`: `0` ok/noop/rate-limited, `1` remediation failed, `2` preconditions.
 
 **Output:** humans on **stderr** (progress, FAIL/WARN, result card). `--json` prints one object on **stdout** (do not parse human tables). `--silent` is an alias of `--quiet`. Colors follow stderr TTY, `NO_COLOR`, `TERM=dumb`, `FORCE_COLOR`, and `--color=auto|always|never`.
 

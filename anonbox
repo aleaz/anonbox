@@ -40,6 +40,13 @@ TOUCHED_MANIFEST="/var/lib/anonbox/touched-files.manifest"
 APPARMOR_APPLIED_AT="/var/lib/anonbox/apparmor-applied.at"
 ANONBOX_STATE_DIR="/var/lib/anonbox"
 ANONBOX_LOG_DIR="/var/log/anonbox"
+ANONBOX_INSTALLED_MARKER="${ANONBOX_STATE_DIR}/installed"
+ANONBOX_BIN_FILE="${ANONBOX_STATE_DIR}/anonbox-bin"
+ANONBOX_LAST_IFACE_IP="${ANONBOX_STATE_DIR}/last-iface-ip"
+ANONBOX_SYNC_LOCK="${ANONBOX_STATE_DIR}/sync-iface.lock"
+ANONBOX_LAST_SYNC_RESTART="${ANONBOX_STATE_DIR}/last-sync-restart"
+NM_SYNC_DISPATCHER="/etc/NetworkManager/dispatcher.d/99-anonbox-sync-iface"
+SYNC_IFACE_MIN_INTERVAL=60
 
 LOGIN_DEFS="/etc/login.defs"
 PAM_COMMON_SESSION="/etc/pam.d/common-session"
@@ -1151,13 +1158,81 @@ EOF
 # Non-loopback TransPort IPv4 from torrc (nft redirect target), or empty.
 torrc_transport_nic_ip()
 {
-    local f="$TORRC"
+    local f="${1:-$TORRC}"
     [[ -f "$f" ]] || { printf '\n'; return 0; }
     grep -E '^[[:space:]]*TransPort[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:9040' "$f" 2>/dev/null \
         | grep -Ev '127\.0\.0\.1' \
         | head -n 1 \
         | sed -E 's/^[[:space:]]*TransPort[[:space:]]+([0-9.]+):9040.*/\1/' \
         || true
+}
+
+torrc_count_nic_transport_lines()
+{
+    local f="${1:-$TORRC}" n
+    [[ -f "$f" ]] || { printf '0\n'; return 0; }
+    n="$(grep -E '^[[:space:]]*TransPort[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:9040' "$f" 2>/dev/null \
+        | grep -Ev '127\.0\.0\.1' \
+        | grep -c . || true)"
+    printf '%s\n' "${n:-0}"
+}
+
+torrc_count_nic_dnsport_lines()
+{
+    local f="${1:-$TORRC}" n
+    [[ -f "$f" ]] || { printf '0\n'; return 0; }
+    n="$(grep -E '^[[:space:]]*DNSPort[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:5353' "$f" 2>/dev/null \
+        | grep -Ev '127\.0\.0\.1' \
+        | grep -c . || true)"
+    printf '%s\n' "${n:-0}"
+}
+
+# Rewrite only NIC TransPort/DNSPort binds (preserve bridges, Socks, comments).
+# Usage: rewrite_torrc_nic_binds SRC DST OLD_IP NEW_IP
+rewrite_torrc_nic_binds()
+{
+    local src="$1" dst="$2" old_ip="$3" new_ip="$4"
+    [[ -f "$src" ]] || return 1
+    is_ipv4 "$old_ip" || return 1
+    is_ipv4 "$new_ip" || return 1
+    if [[ "$new_ip" == "0.0.0.0" ]]; then
+        return 1
+    fi
+    local tp_count dns_count
+    tp_count="$(torrc_count_nic_transport_lines "$src" | tr -d '[:space:]')"
+    dns_count="$(torrc_count_nic_dnsport_lines "$src" | tr -d '[:space:]')"
+    [[ "$tp_count" == "1" && "$dns_count" == "1" ]] || return 1
+
+    awk -v old="$old_ip" -v new="$new_ip" '
+    BEGIN { tp=0; dns=0 }
+    function replace_fixed(line, from, to,    p, n) {
+        p = index(line, from)
+        if (p == 0) return line
+        n = length(from)
+        return substr(line, 1, p - 1) to substr(line, p + n)
+    }
+    /^[[:space:]]*TransPort[[:space:]]+/ && index($0, old ":9040") && index($0, "127.0.0.1") == 0 {
+        $0 = replace_fixed($0, old ":9040", new ":9040")
+        tp++
+        print
+        next
+    }
+    /^[[:space:]]*DNSPort[[:space:]]+/ && index($0, old ":5353") && index($0, "127.0.0.1") == 0 {
+        $0 = replace_fixed($0, old ":5353", new ":5353")
+        dns++
+        print
+        next
+    }
+    { print }
+    END { if (tp != 1 || dns != 1) exit 1 }
+    ' "$src" > "$dst" || return 1
+
+    if grep -E '^[[:space:]]*(TransPort|DNSPort)[[:space:]]+(0\.0\.0\.0|\*)' "$dst" >/dev/null 2>&1; then
+        return 1
+    fi
+    grep -F "TransPort ${new_ip}:9040" "$dst" >/dev/null 2>&1 || return 1
+    grep -F "DNSPort ${new_ip}:5353" "$dst" >/dev/null 2>&1 || return 1
+    return 0
 }
 
 # Live TransPort NIC bind from ss (excluding 127.0.0.1), or empty.
@@ -1180,10 +1255,120 @@ warn_iface_ip_drift()
     configured="$(torrc_transport_nic_ip)"
     live_bind="$(ss_transport_nic_ip)"
     if [[ -n "$configured" && -n "$IFACE_IP" && "$configured" != "$IFACE_IP" ]]; then
-        warn "Primary IPv4 (${IFACE_IP}) differs from torrc TransPort bind (${configured}). Re-run setup after IP/DHCP changes."
+        warn "Primary IPv4 (${IFACE_IP}) differs from torrc TransPort bind (${configured}). Run: sudo ./anonbox sync-iface"
     elif [[ -n "$live_bind" && -n "$IFACE_IP" && "$live_bind" != "$IFACE_IP" ]]; then
-        warn "Primary IPv4 (${IFACE_IP}) differs from live TransPort bind (${live_bind}). Re-run setup after IP/DHCP changes."
+        warn "Primary IPv4 (${IFACE_IP}) differs from live TransPort bind (${live_bind}). Run: sudo ./anonbox sync-iface"
     fi
+}
+
+die_precond()
+{
+    local msg
+    msg="$(printf '\n%s[ERROR]%s %s' "$RED" "$RESET" "$1")"
+    printf '%s\n' "$msg" >&2
+    log_append "[ERROR] $1"
+    exit 2
+}
+
+emit_sync_iface_json()
+{
+    local action="$1" old_ip="$2" new_ip="$3" verdict="$4" exit_code="$5"
+    printf '{'
+    printf '"command":"sync-iface",'
+    printf '"action":"%s",' "$(json_escape "$action")"
+    printf '"old_ip":"%s",' "$(json_escape "$old_ip")"
+    printf '"new_ip":"%s",' "$(json_escape "$new_ip")"
+    printf '"verdict":"%s",' "$(json_escape "$verdict")"
+    printf '"exit_code":%d' "$exit_code"
+    printf '}\n'
+}
+
+wait_for_tor_listeners()
+{
+    local waited=0
+    while (( waited < 15 )); do
+        if systemctl is-active --quiet tor@default.service 2>/dev/null \
+            && ss_listens_tcp "127.0.0.1" 9040 \
+            && { [[ -z "$IFACE_IP" ]] || ss_listens_tcp "$IFACE_IP" 9040; } \
+            && { [[ -z "$IFACE_IP" ]] || ss_listens_udp "$IFACE_IP" 5353; }; then
+            break
+        fi
+        sleep 1
+        (( waited++ )) || true
+    done
+    assert_tor_listeners
+}
+
+# Install marker + NM dispatcher that only enqueues a systemd oneshot.
+install_sync_iface_hook()
+{
+    if (( DRY_RUN == 1 )); then
+        info "[DRY-RUN] Would install sync-iface marker and NetworkManager dispatcher"
+        return 0
+    fi
+    local bin
+    bin="$(realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || printf '%s\n' "${BASH_SOURCE[0]:-$0}")"
+    run mkdir -p "$ANONBOX_STATE_DIR"
+    run mkdir -p /etc/NetworkManager/dispatcher.d 2>/dev/null || true
+    printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ANONBOX_INSTALLED_MARKER"
+    printf '%s\n' "$bin" > "$ANONBOX_BIN_FILE"
+    if [[ -n "$IFACE_IP" ]]; then
+        printf '%s\n' "$IFACE_IP" > "$ANONBOX_LAST_IFACE_IP"
+    fi
+    chmod 644 "$ANONBOX_INSTALLED_MARKER" "$ANONBOX_BIN_FILE" 2>/dev/null || true
+
+    cat > "$NM_SYNC_DISPATCHER" << EOF
+#!/bin/sh
+# anonbox: enqueue sync-iface on DHCP/primary IP changes (must not block NetworkManager).
+# Generated by anonbox v${VERSION} — do not edit; removed by uninstall.
+MARKER="${ANONBOX_INSTALLED_MARKER}"
+BINFILE="${ANONBOX_BIN_FILE}"
+IFACE="\$1"
+ACTION="\$2"
+
+case "\$ACTION" in
+    up|dhcp4-change) ;;
+    *) exit 0 ;;
+esac
+
+[ -f "\$MARKER" ] || exit 0
+[ -f "\$BINFILE" ] || exit 0
+BIN="\$(cat "\$BINFILE" 2>/dev/null)"
+[ -n "\$BIN" ] && [ -x "\$BIN" ] || exit 0
+
+DEF_IFACE="\$(ip route show default 2>/dev/null | awk '/default/ { print \$5; exit }')"
+if [ -n "\$DEF_IFACE" ] && [ "\$IFACE" != "\$DEF_IFACE" ]; then
+    exit 0
+fi
+
+logger -t anonbox-sync-iface "enqueue sync-iface after \$ACTION on \$IFACE"
+# Never stop an in-progress sync (would skip torrc rollback mid-restart).
+if systemctl is-active --quiet anonbox-sync-iface.service 2>/dev/null; then
+    logger -t anonbox-sync-iface "sync already active; skip enqueue"
+    exit 0
+fi
+systemctl reset-failed anonbox-sync-iface.service 2>/dev/null || true
+systemd-run --collect --unit=anonbox-sync-iface.service "\$BIN" sync-iface --quiet \\
+    >/dev/null 2>&1 || logger -t anonbox-sync-iface "systemd-run failed (is systemd available?)"
+exit 0
+EOF
+    run chmod 755 "$NM_SYNC_DISPATCHER"
+    record_touched_file "$NM_SYNC_DISPATCHER"
+    record_touched_file "$ANONBOX_INSTALLED_MARKER"
+    record_touched_file "$ANONBOX_BIN_FILE"
+    ok "Installed IFACE_IP sync hook: $NM_SYNC_DISPATCHER"
+}
+
+remove_sync_iface_hook()
+{
+    run rm -f "$NM_SYNC_DISPATCHER"
+    run rm -f "$ANONBOX_INSTALLED_MARKER"
+    run rm -f "$ANONBOX_BIN_FILE"
+    run rm -f "$ANONBOX_LAST_IFACE_IP"
+    run rm -f "$ANONBOX_SYNC_LOCK"
+    run rm -f "$ANONBOX_LAST_SYNC_RESTART"
+    systemctl reset-failed anonbox-sync-iface.service 2>/dev/null || true
+    systemctl stop anonbox-sync-iface.service 2>/dev/null || true
 }
 
 effective_tor_defaults()
@@ -1847,6 +2032,8 @@ EOF
     record_touched_file "$APPARMOR_TOR_LOCAL"
     record_touched_file "$TOUCHED_MANIFEST"
 
+    install_sync_iface_hook
+
     if (( IN_PIPELINE == 0 )); then
         print_result_card "setup" "complete" \
             "sudo ./anonbox check" \
@@ -2341,10 +2528,10 @@ cmd_check()
             live_tp="$(ss_transport_nic_ip)"
             if [[ -n "$configured_tp" && "$configured_tp" != "$IFACE_IP" ]]; then
                 fail_fix "IFACE_IP drift: live primary ${IFACE_IP} ≠ torrc TransPort ${configured_tp}" \
-                    "sudo ./anonbox setup (after DHCP/IP change)" "iface-drift" "leak"
+                    "sudo ./anonbox sync-iface (or setup if torrc/nft missing)" "iface-drift" "leak"
             elif [[ -n "$live_tp" && "$live_tp" != "$IFACE_IP" ]]; then
                 fail_fix "IFACE_IP drift: live primary ${IFACE_IP} ≠ ss TransPort bind ${live_tp}" \
-                    "sudo ./anonbox setup (after DHCP/IP change)" "iface-drift" "leak"
+                    "sudo ./anonbox sync-iface (or setup if torrc/nft missing)" "iface-drift" "leak"
             elif [[ -n "$configured_tp" || -n "$live_tp" ]]; then
                 pass "TransPort NIC bind matches live primary IPv4 (${IFACE_IP})"
             fi
@@ -2825,10 +3012,10 @@ cmd_doctor()
     live_tp="$(ss_transport_nic_ip)"
     if [[ -n "$IFACE_IP" && -n "$configured_tp" && "$configured_tp" != "$IFACE_IP" ]]; then
         fail_fix "IFACE_IP drift vs torrc TransPort" \
-            "sudo ./anonbox setup" "iface-drift" "leak"
+            "sudo ./anonbox sync-iface (or setup if torrc/nft missing)" "iface-drift" "leak"
     elif [[ -n "$IFACE_IP" && -n "$live_tp" && "$live_tp" != "$IFACE_IP" ]]; then
         fail_fix "IFACE_IP drift vs live TransPort bind" \
-            "sudo ./anonbox setup" "iface-drift" "leak"
+            "sudo ./anonbox sync-iface (or setup if torrc/nft missing)" "iface-drift" "leak"
     elif [[ -n "$IFACE_IP" ]]; then
         pass "Primary IPv4 ${IFACE_IP} looks consistent with TransPort binds"
     fi
@@ -2973,6 +3160,209 @@ cmd_status()
 }
 
 # =============================================================================
+# SUBCOMMAND: sync-iface
+# =============================================================================
+
+cmd_sync_iface()
+{
+    step "anonbox sync-iface (rebind Tor TransPort/DNSPort to live primary IPv4)"
+
+    if (( DRY_RUN == 0 )); then
+        require_root
+    fi
+
+    detect_network
+
+    if [[ ! -f "$TORRC" ]]; then
+        if (( JSON_OUT == 1 )); then
+            emit_sync_iface_json "error" "" "${IFACE_IP:-}" "FAIL" 2
+        fi
+        die_precond "$TORRC missing. Run: sudo ./anonbox setup"
+    fi
+    if ! grep -E '^[[:space:]]*TransPort[[:space:]]+127\.0\.0\.1:9040' "$TORRC" >/dev/null 2>&1; then
+        if (( JSON_OUT == 1 )); then
+            emit_sync_iface_json "error" "" "${IFACE_IP:-}" "FAIL" 2
+        fi
+        die_precond "$TORRC does not look like an anonbox torrc (missing TransPort 127.0.0.1:9040). Run: sudo ./anonbox setup"
+    fi
+
+    if [[ -z "$IFACE_IP" ]] || ! is_ipv4 "$IFACE_IP"; then
+        if (( JSON_OUT == 1 )); then
+            emit_sync_iface_json "error" "" "" "FAIL" 2
+        fi
+        die_precond "Could not detect a valid primary IPv4 on ${IFACE:-unknown}."
+    fi
+
+    local tp_count dns_count
+    tp_count="$(torrc_count_nic_transport_lines "$TORRC" | tr -d '[:space:]')"
+    dns_count="$(torrc_count_nic_dnsport_lines "$TORRC" | tr -d '[:space:]')"
+    if [[ "$tp_count" != "1" || "$dns_count" != "1" ]]; then
+        if (( JSON_OUT == 1 )); then
+            emit_sync_iface_json "error" "" "$IFACE_IP" "FAIL" 2
+        fi
+        die_precond "torrc must have exactly one NIC TransPort and one NIC DNSPort (found TransPort=${tp_count} DNSPort=${dns_count}). Run: sudo ./anonbox setup"
+    fi
+
+    if (( DRY_RUN == 0 )); then
+        local tables
+        tables="$(nft list tables 2>/dev/null || true)"
+        if [[ "$tables" != *"tor_nat"* || "$tables" != *"tor_filter"* ]]; then
+            if (( JSON_OUT == 1 )); then
+                emit_sync_iface_json "error" "" "$IFACE_IP" "FAIL" 2
+            fi
+            die_precond "nftables tor_nat/tor_filter not loaded. Run: sudo ./anonbox setup"
+        fi
+    fi
+
+    local old_ip live_bind new_ip action
+    old_ip="$(torrc_transport_nic_ip "$TORRC")"
+    live_bind="$(ss_transport_nic_ip)"
+    new_ip="$IFACE_IP"
+    action="noop"
+
+    if [[ -z "$old_ip" ]]; then
+        if (( JSON_OUT == 1 )); then
+            emit_sync_iface_json "error" "" "$new_ip" "FAIL" 2
+        fi
+        die_precond "Could not parse NIC TransPort from $TORRC. Run: sudo ./anonbox setup"
+    fi
+
+    if [[ "$old_ip" == "$new_ip" && "$live_bind" == "$new_ip" ]]; then
+        if (( DRY_RUN == 0 )); then
+            mkdir -p "$ANONBOX_STATE_DIR" 2>/dev/null || true
+            printf '%s\n' "$new_ip" > "$ANONBOX_LAST_IFACE_IP" 2>/dev/null || true
+        fi
+        ok "Already in sync: TransPort/DNSPort NIC bind is ${new_ip}"
+        if (( JSON_OUT == 1 )); then
+            emit_sync_iface_json "noop" "$old_ip" "$new_ip" "OK" 0
+        else
+            print_result_card "sync-iface" "noop" "already ${new_ip}"
+        fi
+        return 0
+    fi
+
+    if (( DRY_RUN == 1 )); then
+        info "[DRY-RUN] Would sync TransPort/DNSPort NIC bind: ${old_ip} -> ${new_ip}"
+        if [[ "$old_ip" == "$new_ip" ]]; then
+            info "[DRY-RUN] torrc already matches; would restart Tor to fix live listeners"
+        fi
+        if (( JSON_OUT == 1 )); then
+            emit_sync_iface_json "dry-run" "$old_ip" "$new_ip" "OK" 0
+        else
+            print_result_card "sync-iface" "dry-run" "${old_ip} -> ${new_ip}"
+        fi
+        return 0
+    fi
+
+    # Rate-limit restarts (NM MAC/DHCP flaps).
+    if [[ -f "$ANONBOX_LAST_SYNC_RESTART" ]]; then
+        local last_ts now_ts
+        last_ts="$(tr -d '[:space:]' < "$ANONBOX_LAST_SYNC_RESTART" 2>/dev/null || echo 0)"
+        now_ts="$(date +%s)"
+        if [[ "$last_ts" =~ ^[0-9]+$ ]] && (( now_ts - last_ts < SYNC_IFACE_MIN_INTERVAL )); then
+            warn "sync-iface rate-limited (last successful restart $(( now_ts - last_ts ))s ago; min ${SYNC_IFACE_MIN_INTERVAL}s). Will retry on next DHCP event."
+            if (( JSON_OUT == 1 )); then
+                emit_sync_iface_json "rate-limited" "$old_ip" "$new_ip" "OK" 0
+            fi
+            return 0
+        fi
+    fi
+
+    mkdir -p "$ANONBOX_STATE_DIR" 2>/dev/null || true
+    exec 9>"$ANONBOX_SYNC_LOCK"
+    if ! flock -n 9; then
+        warn "Another sync-iface is in progress; skipping"
+        if (( JSON_OUT == 1 )); then
+            emit_sync_iface_json "locked" "$old_ip" "$new_ip" "OK" 0
+        fi
+        return 0
+    fi
+
+    local tmp_torrc restore_copy
+    tmp_torrc="$(anonbox_mktemp)"
+    restore_copy="$(anonbox_mktemp)"
+    TMP_FILES+=("$tmp_torrc" "$restore_copy")
+    cp -a "$TORRC" "$restore_copy"
+
+    if [[ "$old_ip" != "$new_ip" ]]; then
+        if ! rewrite_torrc_nic_binds "$TORRC" "$tmp_torrc" "$old_ip" "$new_ip"; then
+            if (( JSON_OUT == 1 )); then
+                emit_sync_iface_json "error" "$old_ip" "$new_ip" "FAIL" 1
+            fi
+            die "Failed to rewrite NIC TransPort/DNSPort binds in torrc"
+        fi
+        assert_torrc_safe_binds "$tmp_torrc"
+
+        local eff_defaults
+        eff_defaults="$(effective_tor_defaults)"
+        if [[ -f "$eff_defaults" ]]; then
+            if ! tor --defaults-torrc "$eff_defaults" -f "$tmp_torrc" --verify-config >/dev/null 2>&1; then
+                if (( JSON_OUT == 1 )); then
+                    emit_sync_iface_json "error" "$old_ip" "$new_ip" "FAIL" 1
+                fi
+                die "tor --verify-config failed for rewritten torrc"
+            fi
+        elif ! tor -f "$tmp_torrc" --verify-config >/dev/null 2>&1; then
+            if (( JSON_OUT == 1 )); then
+                emit_sync_iface_json "error" "$old_ip" "$new_ip" "FAIL" 1
+            fi
+            die "tor --verify-config failed for rewritten torrc"
+        fi
+
+        backup_file "$TORRC"
+        cp "$tmp_torrc" "$TORRC"
+        chown root:"$TOR_USER" "$TORRC" 2>/dev/null || true
+        chmod 640 "$TORRC"
+        action="updated"
+        ok "Rewrote torrc NIC binds: ${old_ip} -> ${new_ip}"
+    else
+        action="restart"
+        info "torrc NIC bind already ${new_ip}; restarting Tor to refresh live listeners"
+        cp -a "$TORRC" "$tmp_torrc"
+    fi
+
+    if ! systemctl restart tor@default.service; then
+        warn "Tor restart failed; restoring previous torrc"
+        cp -a "$restore_copy" "$TORRC"
+        chown root:"$TOR_USER" "$TORRC" 2>/dev/null || true
+        chmod 640 "$TORRC"
+        systemctl restart tor@default.service 2>/dev/null || true
+        if (( JSON_OUT == 1 )); then
+            emit_sync_iface_json "$action" "$old_ip" "$new_ip" "FAIL" 1
+        fi
+        die "Failed to restart tor@default.service after sync-iface"
+    fi
+
+    if ! ( wait_for_tor_listeners ); then
+        warn "Listeners not healthy after sync; restoring previous torrc"
+        cp -a "$restore_copy" "$TORRC"
+        chown root:"$TOR_USER" "$TORRC" 2>/dev/null || true
+        chmod 640 "$TORRC"
+        systemctl restart tor@default.service 2>/dev/null || true
+        ( wait_for_tor_listeners ) 2>/dev/null || true
+        if (( JSON_OUT == 1 )); then
+            emit_sync_iface_json "$action" "$old_ip" "$new_ip" "FAIL" 1
+        fi
+        die "Tor listeners failed after sync-iface (torrc restored). Traffic should DROP until fixed."
+    fi
+
+    date +%s > "$ANONBOX_LAST_SYNC_RESTART" 2>/dev/null || true
+    printf '%s\n' "$new_ip" > "$ANONBOX_LAST_IFACE_IP" 2>/dev/null || true
+    info "Tor restarted to rebind TransPort/DNSPort; traffic may drop briefly until circuits rebuild"
+    ok "sync-iface complete: ${old_ip} -> ${new_ip}"
+
+    if (( JSON_OUT == 1 )); then
+        emit_sync_iface_json "$action" "$old_ip" "$new_ip" "OK" 0
+    else
+        print_result_card "sync-iface" "complete" \
+            "${old_ip} -> ${new_ip}" \
+            "sudo ./anonbox check" \
+            "Traffic may drop briefly until Tor rebuilds circuits"
+    fi
+    return 0
+}
+
+# =============================================================================
 # SUBCOMMAND: rollback
 # =============================================================================
 
@@ -3096,6 +3486,7 @@ cmd_uninstall()
     run rm -f "$NM_DNS_CONF"
     run rm -f "$NM_MAC_CONF"
     run rm -f "$NM_CONN_CONF"
+    remove_sync_iface_hook
     run rm -f "$NFTABLES_OVERRIDE"
     run rm -f "$LOCALNET_SYSCTL"
     run rm -f "$SYSCTL_FILE"
@@ -3195,6 +3586,7 @@ Commands:
   doctor      Read-only diagnostics with Fix hints (no kill-switch, no live leak curls)
   all         Execute full pipeline: setup -> harden -> check
   status      Show current Tor connection health, circuits, and public exit IP
+  sync-iface  Rebind Tor TransPort/DNSPort to the live primary IPv4 (DHCP / IP drift)
   rollback    Restore a snapshot from /var/backups/anonbox/ (--snapshot ID or interactive)
   uninstall   Restore clearnet with baseline nftables accept policy (not an empty ruleset)
   version     Display version information
@@ -3207,7 +3599,7 @@ Global options:
   --yes, -y             Assume yes for prompts (SSH preflight, uninstall/rollback)
   --quiet, -q, --silent
                         Suppress PASS/OK/info; still print FAIL/WARN and the result card
-  --json                Machine-readable report on stdout (check, doctor, status)
+  --json                Machine-readable report on stdout (check, doctor, status, sync-iface)
   --color MODE          auto (default), always, or never (also --color=auto|always|never)
   --no-color            Disable ANSI colors (also NO_COLOR=1, TERM=dumb; FORCE_COLOR enables in auto)
   --log-file NAME       Session log basename under /var/log/anonbox/ only (no absolute paths)
@@ -3230,6 +3622,7 @@ Examples:
   sudo ./anonbox check --no-kill-switch
   sudo ./anonbox doctor
   sudo ./anonbox check --json --quiet
+  sudo ./anonbox sync-iface
   sudo ./anonbox uninstall --yes
 EOF
 }
@@ -3295,6 +3688,20 @@ anonbox status — Tor/nftables operational status
 
 Usage: ./anonbox status [options]
 Options: --json | --iface IFACE | --verbose | --quiet | --silent | --no-color | --color MODE
+EOF
+            ;;
+        sync-iface)
+            cat << EOF
+anonbox sync-iface — Rebind Tor TransPort/DNSPort after DHCP/IP drift
+
+Usage: sudo ./anonbox sync-iface [options]
+Options: --iface IFACE | --json | --quiet | --silent | --dry-run | --verbose
+         --no-color | --color MODE | --log-file PATH | --no-log
+
+Rewrites only NIC TransPort/DNSPort lines in torrc, verifies config, restarts
+tor@default, and asserts listeners. Does not regenerate nftables or run setup.
+NetworkManager dispatcher (installed by setup) enqueues this via systemd-run.
+Exit codes: 0=ok/noop/rate-limited/locked, 1=remediation failed, 2=preconditions (missing torrc/nft/IP).
 EOF
             ;;
         uninstall)
@@ -3428,6 +3835,16 @@ parse_options()
 
 main()
 {
+    # Undocumented CI selftest: ANONBOX_REWRITE_SELFTEST=1 ./anonbox SRC DST OLD_IP NEW_IP
+    if [[ "${ANONBOX_REWRITE_SELFTEST:-}" == "1" ]]; then
+        if [[ $# -ne 4 ]]; then
+            printf 'ANONBOX_REWRITE_SELFTEST requires: SRC DST OLD_IP NEW_IP\n' >&2
+            exit 2
+        fi
+        rewrite_torrc_nic_binds "$1" "$2" "$3" "$4"
+        exit $?
+    fi
+
     [[ $# -eq 0 ]] && { show_help; exit 0; }
 
     local command="$1"
@@ -3447,7 +3864,7 @@ main()
     fi
 
     case "$command" in
-        setup|harden|check|doctor|all|rollback|uninstall)
+        setup|harden|check|doctor|all|rollback|uninstall|sync-iface)
             start_session_log
             ;;
     esac
@@ -3459,6 +3876,7 @@ main()
         doctor)     cmd_doctor; return $? ;;
         all)        cmd_all; return $? ;;
         status)     cmd_status; return $? ;;
+        sync-iface) cmd_sync_iface; return $? ;;
         rollback)   cmd_rollback ;;
         uninstall)  cmd_uninstall ;;
         version)    printf 'anonbox v%s\n' "$VERSION" ;;

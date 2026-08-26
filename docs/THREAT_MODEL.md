@@ -51,7 +51,7 @@
 ### Accepted Residuals (In-Scope, Documented)
 
 1. **Bootstrap clearnet:** The first `git clone` / `apt-get install` (before fail-closed nftables) uses the real ISP path. Prefer installing from a preseeded image or offline packages when that matters.
-2. **NIC TransPort/DNSPort binds:** Required for nft `redirect` on tested kernels. Mitigated by INPUT drop of 9040/5353; residual if nftables fails to load at boot.
+2. **NIC TransPort/DNSPort binds:** Required for nft `redirect` on tested kernels. Mitigated by INPUT drop of 9040/5353; residual if nftables fails to load at boot. **IFACE_IP drift** after DHCP is remediable via `sudo ./anonbox sync-iface` (and automatically enqueued by the NetworkManager dispatcher when `/var/lib/anonbox/installed` is present). Without NetworkManager, run `sync-iface` manually after IP changes.
 3. **MAC under NAT:** NetworkManager `cloned-mac-address=random` only affects the guest NIC. Upstream NAT still shows the host MAC — not L2 anti-fingerprint.
 4. **Shell history:** `HISTFILE` is unset (no persistent history). This is not Tails-style amnesia (RAM-only rootfs).
 
@@ -86,5 +86,6 @@ Release gate: prefer `sudo ./anonbox check` (without `--no-kill-switch`). **SAFE
 | **21** | NM Connectivity Check | `cat /etc/NetworkManager/conf.d/20-connectivity.conf` | `enabled=false` |
 | **22** | Boot Ordering Check | `systemctl show -p Before nftables` | Contains `network-pre.target` |
 | **23** | Safe TransPort/DNSPort binds | `ss -lnt sport = :9040` / `ss -lnu :5353` | `127.0.0.1` + NIC IP; never `0.0.0.0`/`*`; SOCKS localhost only |
+| **24** | IFACE_IP drift remediation | After IP change: `sudo ./anonbox sync-iface` then `check` | No `iface-drift` FAIL; listeners on new primary IPv4 |
 | **24** | nft redirect + INPUT deny | `nft list table ip tor_nat` / `tor_filter` | `redirect to :9040/:5353`; INPUT drops 9040/5353; OUTPUT `fib daddr type local` |
 | **25** | nft boot ordering | `systemctl show -p After nftables` | Includes `systemd-modules-load` or `sysinit` |

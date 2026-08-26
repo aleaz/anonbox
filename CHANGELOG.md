@@ -7,9 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `anonbox sync-iface`: rebind Tor `TransPort`/`DNSPort` NIC listens after DHCP/IP drift (rewrite torrc lines only, verify-config, restart Tor, assert listeners; rollback torrc on failure).
+- NetworkManager dispatcher `/etc/NetworkManager/dispatcher.d/99-anonbox-sync-iface` (installed by `setup`, removed by `uninstall`) enqueues `sync-iface` via `systemd-run` oneshot — does not block NM.
+- State markers under `/var/lib/anonbox/` (`installed`, `anonbox-bin`, `last-iface-ip`) gate the hook.
+
 ### Changed
 
 - Docs: `--allow-ssh` persists in `/etc/nftables.conf` across reboot; re-setup without the flag removes it (README, SECURITY, ARCHITECTURE, THREAT_MODEL).
+- `check`/`doctor`/`status` IFACE_IP drift remediation points to `sync-iface` (or `setup` if torrc/nft missing).
+- ARCHITECTURE §6 / THREAT_MODEL / SECURITY document sync-iface + NM oneshot path.
 
 ## [1.2.2] - 2026-08-25
 
