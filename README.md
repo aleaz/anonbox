@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🧅 Anonbox
+<img src="anonbox.jpg" alt="Anonbox" width="500" />
 
 ## _A small toolkit that quickly turns a standard Debian guest VM into a fail-closed Tor workstation._
 
@@ -79,10 +79,6 @@ sudo reboot
 | **Anti-Fingerprint** | UTC, MAC, Hostname    | Standardized Identity        | **UTC, hostname, machine-id; NM MAC (not L2 under NAT)**               |
 
 ## System Architecture
-
-<p align="center">
-  <img src="anonbox.jpg" alt="Anonbox Architecture Overview" width="100%" />
-</p>
 
 ```mermaid
 flowchart TD
