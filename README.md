@@ -2,10 +2,10 @@
 
 # 🧅 Anonbox
 
-## *A small toolkit that quickly turns a standard Debian guest VM into a fail-closed Tor workstation.*
+## _A small toolkit that quickly turns a standard Debian guest VM into a fail-closed Tor workstation._
 
 [![Release](https://img.shields.io/badge/release-v1.2.2-7D4698.svg?style=flat-square&logo=github)](https://github.com/aleaz/anonbox/releases)
-[![Debian: 12 | 13](https://img.shields.io/badge/Debian-12%20(Bookworm)%20%7C%2013%20(Trixie)-D70A53.svg?style=flat-square&logo=debian&logoColor=white)](https://www.debian.org/)
+[![Debian: 12 | 13](<https://img.shields.io/badge/Debian-12%20(Bookworm)%20%7C%2013%20(Trixie)-D70A53.svg?style=flat-square&logo=debian&logoColor=white>)](https://www.debian.org/)
 [![Tor: Transparent Proxy](https://img.shields.io/badge/Tor-Transparent%20Proxy-7D4698.svg?style=flat-square&logo=torproject&logoColor=white)](https://www.torproject.org/)
 [![Hardening: KSPP & Tails](https://img.shields.io/badge/Hardening-KSPP%20%7C%20Tails%20Standard-success.svg?style=flat-square&logo=linux&logoColor=white)](docs/ARCHITECTURE.md)
 [![CI](https://github.com/aleaz/anonbox/actions/workflows/lint.yml/badge.svg?style=flat-square)](https://github.com/aleaz/anonbox/actions/workflows/lint.yml)
@@ -21,14 +21,14 @@
 
 ## At a Glance
 
-| Specification | Details |
-| :--- | :--- |
-| **Target OS** | Debian GNU/Linux 12 (Bookworm) and 13 (Trixie) |
-| **Architecture** | `ARM64` (Apple Silicon UTM) and `x86_64` (VirtualBox, KVM, Proxmox) |
-| **Traffic Policy** | 100% Fail-Closed routing through Tor (`nftables` priority drop) |
-| **Security Standards** | KSPP (Kernel Self Protection), Tails OS & Whonix Hardening Patterns |
-| **Storage Security** | User-provided LUKS2 / eCryptfs; **required for SAFE**, optional for disposable lab |
-| **Deployment** | Dedicated Debian **guest VM** only (not your daily host / bare metal) |
+| Specification          | Details                                                                            |
+| :--------------------- | :--------------------------------------------------------------------------------- |
+| **Target OS**          | Debian GNU/Linux 12 (Bookworm) and 13 (Trixie)                                     |
+| **Architecture**       | `ARM64` (Apple Silicon UTM) and `x86_64` (VirtualBox, KVM, Proxmox)                |
+| **Traffic Policy**     | 100% Fail-Closed routing through Tor (`nftables` priority drop)                    |
+| **Security Standards** | KSPP (Kernel Self Protection), Tails OS & Whonix Hardening Patterns                |
+| **Storage Security**   | User-provided LUKS2 / eCryptfs; **required for SAFE**, optional for disposable lab |
+| **Deployment**         | Dedicated Debian **guest VM** only (not your daily host / bare metal)              |
 
 > [!WARNING]
 > **Dedicated VM only.** Run `anonbox` inside a guest (UTM / VirtualBox / KVM). **Do not** run it on your daily host or trusted bare metal: hardening closes inbound access by default, can lock you out, and a compromised host defeats the guest (see [SECURITY.md](SECURITY.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)).
@@ -69,49 +69,53 @@ sudo reboot
 
 ## Why Anonbox?
 
-| Security Vector | Tails OS (Live USB) | Whonix (2 VMs: Gateway + WS) | Anonbox (This Project) |
-| :--- | :--- | :--- | :--- |
-| **Deployment Model** | Ephemeral Live USB | 2 Dedicated VMs (Heavy RAM) | **Single hardened guest VM (toolkit / script)** |
-| **Persistence** | Limited to USB Volume | VM Disk Images | **Persistent by design** (encrypt if you enable LUKS; **not** amnesia) |
-| **Tor Routing** | iptables/nftables | Hypervisor-isolated Gateway | **Local Fail-Closed nftables Kill-Switch** |
-| **Leak Prevention** | Blocked | Blocked | **Kernel-Level Drop (UDP, ICMP, IPv6)** |
-| **Stream Isolation** | Per application | Per SocksPort | **Multi-Port Isolation (9050, 9051, 9052)** |
-| **Anti-Fingerprint** | UTC, MAC, Hostname | Standardized Identity | **UTC, hostname, machine-id; NM MAC (not L2 under NAT)** |
+| Security Vector      | Tails OS (Live USB)   | Whonix (2 VMs: Gateway + WS) | Anonbox (This Project)                                                 |
+| :------------------- | :-------------------- | :--------------------------- | :--------------------------------------------------------------------- |
+| **Deployment Model** | Ephemeral Live USB    | 2 Dedicated VMs (Heavy RAM)  | **Single hardened guest VM (toolkit / script)**                        |
+| **Persistence**      | Limited to USB Volume | VM Disk Images               | **Persistent by design** (encrypt if you enable LUKS; **not** amnesia) |
+| **Tor Routing**      | iptables/nftables     | Hypervisor-isolated Gateway  | **Local Fail-Closed nftables Kill-Switch**                             |
+| **Leak Prevention**  | Blocked               | Blocked                      | **Kernel-Level Drop (UDP, ICMP, IPv6)**                                |
+| **Stream Isolation** | Per application       | Per SocksPort                | **Multi-Port Isolation (9050, 9051, 9052)**                            |
+| **Anti-Fingerprint** | UTC, MAC, Hostname    | Standardized Identity        | **UTC, hostname, machine-id; NM MAC (not L2 under NAT)**               |
 
 ## System Architecture
+
+<p align="center">
+  <img src="anonbox.jpg" alt="Anonbox Architecture Overview" width="100%" />
+</p>
 
 ```mermaid
 flowchart TD
     subgraph Host["Host Machine (macOS / Linux / Windows)"]
         subgraph Guest["anonbox Guest (Debian 12/13 — LUKS2 Encrypted)"]
             Apps["Applications / CLI / Tor Browser"]
-            
+
             Apps -->|TCP Egress| NFT_NAT["nftables NAT: redirect to :9040"]
             Apps -->|UDP Port 53| NFT_NAT
             Apps -->|Non-Tor UDP / ICMP / IPv6| NFT_FILTER["nftables Filter: Drop"]
-            
+
             NFT_NAT -->|TCP to NIC_IP:9040| Tor_TransPort["Tor TransPort 127.0.0.1 + NIC_IP:9040"]
             NFT_NAT -->|DNS to NIC_IP:5353| Tor_DNSPort["Tor DNSPort 127.0.0.1 + NIC_IP:5353"]
-            
+
             Tor_TransPort --> Tor_Core["Tor Core Daemon (uid: debian-tor)"]
             Tor_DNSPort --> Tor_Core
-            
+
             Tor_Core -->|"obfs4 / WebTunnel / Snowflake if installed / Direct"| Tor_Outbound["Encrypted Tor Traffic"]
         end
-        
+
         Tor_Outbound --> NAT_Adapter["Virtual NAT Adapter"]
     end
-    
+
     NAT_Adapter --> Internet["Internet (Tor Guard Node)"]
     NFT_FILTER -.->|Blocked at Kernel| DropNode["[Destroyed / No Leak]"]
 ```
 
 ## Core Security Pillars
 
-* **100% Fail-Closed Transparent Routing:** All outbound TCP and DNS traffic is nft-`redirect`ed to Tor (`TransPort`/`DNSPort` on `127.0.0.1` and the NIC primary IP — never `0.0.0.0`). INPUT drops new LAN connections to those ports. If Tor terminates, the firewall drops non-Tor egress. Non-Tor UDP, ICMP, and IPv6 are dropped at kernel level.
-* **Kernel & Memory Protection:** Memory zeroing on allocation/free (`init_on_alloc=1`, `init_on_free=1` in GRUB), Yama LSM ptrace restriction (`ptrace_scope=2`), TTY command injection mitigation (`legacy_tiocsti=0`), core dumps disabled, and secure `noexec,nosuid,nodev` mounts for `/tmp`, `/var/tmp`, and `/dev/shm`. Unprivileged user namespaces stay enabled so Tor Browser's sandbox works.
-* **Identity & Telemetry Suppression:** Forced UTC, NetworkManager cloned-MAC (guest NIC only — **not** L2 anti-FP under hypervisor NAT), neutral hostname (`localhost`), standardized `/etc/machine-id`, and Debian `popularity-contest` purging. Shell `HISTFILE` is unset (not Tails-style amnesia).
-* **Stream Isolation & Anti-Censorship:** Multi-SOCKS5 circuit isolation (9050, 9051, 9052). `obfs4` and `WebTunnel` via obfs4proxy/lyrebird; Snowflake only if `snowflake-client` is installed.
+- **100% Fail-Closed Transparent Routing:** All outbound TCP and DNS traffic is nft-`redirect`ed to Tor (`TransPort`/`DNSPort` on `127.0.0.1` and the NIC primary IP — never `0.0.0.0`). INPUT drops new LAN connections to those ports. If Tor terminates, the firewall drops non-Tor egress. Non-Tor UDP, ICMP, and IPv6 are dropped at kernel level.
+- **Kernel & Memory Protection:** Memory zeroing on allocation/free (`init_on_alloc=1`, `init_on_free=1` in GRUB), Yama LSM ptrace restriction (`ptrace_scope=2`), TTY command injection mitigation (`legacy_tiocsti=0`), core dumps disabled, and secure `noexec,nosuid,nodev` mounts for `/tmp`, `/var/tmp`, and `/dev/shm`. Unprivileged user namespaces stay enabled so Tor Browser's sandbox works.
+- **Identity & Telemetry Suppression:** Forced UTC, NetworkManager cloned-MAC (guest NIC only — **not** L2 anti-FP under hypervisor NAT), neutral hostname (`localhost`), standardized `/etc/machine-id`, and Debian `popularity-contest` purging. Shell `HISTFILE` is unset (not Tails-style amnesia).
+- **Stream Isolation & Anti-Censorship:** Multi-SOCKS5 circuit isolation (9050, 9051, 9052). `obfs4` and `WebTunnel` via obfs4proxy/lyrebird; Snowflake only if `snowflake-client` is installed.
 
 > Interactive browsing must use **Tor Browser**. The transparent proxy does not hide canvas, WebGL, or font fingerprints of a stock browser.
 
@@ -176,17 +180,17 @@ flowchart TD
         Wallet["Crypto Wallet / Financial"] -->|SOCKS5 :9051| CircuitB["Circuit B (Entry -> Middle -> Exit 2)"]
         Automation["CLI / Automated Scripts"] -->|SOCKS5 :9052| CircuitC["Circuit C (Entry -> Middle -> Exit 3)"]
     end
-    
+
     CircuitA --> SiteA["Target Website A"]
     CircuitB --> SiteB["Target Service B"]
     CircuitC --> SiteC["Target API C"]
 ```
 
-| SOCKS5 Port | Isolation Policy | Recommended Use Case |
-| :--- | :--- | :--- |
-| **`127.0.0.1:9050`** | `IsolateDestAddr`, `IsolateDestPort` | Standard browsing, general tools, package updates |
-| **`127.0.0.1:9051`** | `IsolateDestAddr` | Financial apps, cryptocurrency wallets (Monero / Feather) |
-| **`127.0.0.1:9052`** | `IsolateDestAddr`, `IsolateDestPort`, `IsolateClientAddr` | Sensitive CLI automation, scraping, isolated sessions |
+| SOCKS5 Port          | Isolation Policy                                          | Recommended Use Case                                      |
+| :------------------- | :-------------------------------------------------------- | :-------------------------------------------------------- |
+| **`127.0.0.1:9050`** | `IsolateDestAddr`, `IsolateDestPort`                      | Standard browsing, general tools, package updates         |
+| **`127.0.0.1:9051`** | `IsolateDestAddr`                                         | Financial apps, cryptocurrency wallets (Monero / Feather) |
+| **`127.0.0.1:9052`** | `IsolateDestAddr`, `IsolateDestPort`, `IsolateClientAddr` | Sensitive CLI automation, scraping, isolated sessions     |
 
 ```bash
 # Query endpoint A via isolated circuit
@@ -204,10 +208,10 @@ If connecting from behind state-level DPI firewalls or censored networks, `anonb
 
 Obtain private bridge lines from official Tor Project distribution channels:
 
-* **Web:** [https://bridges.torproject.org/options](https://bridges.torproject.org/options) (select `obfs4`)
-* **Email:** Send an email to `bridges@torproject.org` from a Gmail or Riseup account with body `get transport obfs4`
-* **Telegram:** Chat with [@GetBridgesBot](https://t.me/GetBridgesBot) and send `/bridges`
-* **Tor Browser:** Copy bridges from *Settings > Tor > Bridges*
+- **Web:** [https://bridges.torproject.org/options](https://bridges.torproject.org/options) (select `obfs4`)
+- **Email:** Send an email to `bridges@torproject.org` from a Gmail or Riseup account with body `get transport obfs4`
+- **Telegram:** Chat with [@GetBridgesBot](https://t.me/GetBridgesBot) and send `/bridges`
+- **Tor Browser:** Copy bridges from _Settings > Tor > Bridges_
 
 ### 2. Bridge File Format
 
@@ -237,12 +241,12 @@ sudo ./anonbox all --bridges-file bridges.txt
 
 ## Documentation
 
-* [Software Design Document & Architecture](docs/ARCHITECTURE.md)
-* [Threat Model & Acceptance Test Matrix](docs/THREAT_MODEL.md)
-* [Hypervisor Configuration Guide (UTM, VirtualBox, KVM)](docs/HYPERVISORS.md)
-* [Security Policy & Vulnerability Disclosure](SECURITY.md)
-* [Contributing Guidelines](CONTRIBUTING.md)
-* [Changelog](CHANGELOG.md)
+- [Software Design Document & Architecture](docs/ARCHITECTURE.md)
+- [Threat Model & Acceptance Test Matrix](docs/THREAT_MODEL.md)
+- [Hypervisor Configuration Guide (UTM, VirtualBox, KVM)](docs/HYPERVISORS.md)
+- [Security Policy & Vulnerability Disclosure](SECURITY.md)
+- [Contributing Guidelines](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
 
 ---
 
