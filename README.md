@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="anonbox.png" alt="Anonbox" width="380" />
+<img src="anonbox.png" alt="Anonbox" width="300" />
 
 ## _A small toolkit that quickly turns a standard Debian guest VM into a fail-closed Tor workstation._
 
