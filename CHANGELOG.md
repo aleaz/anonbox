@@ -9,15 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `anonbox sync-iface`: rebind Tor `TransPort`/`DNSPort` NIC listens after DHCP/IP drift (rewrite torrc lines only, verify-config, restart Tor, assert listeners; rollback torrc on failure).
-- NetworkManager dispatcher `/etc/NetworkManager/dispatcher.d/99-anonbox-sync-iface` (installed by `setup`, removed by `uninstall`) enqueues `sync-iface` via `systemd-run` oneshot — does not block NM.
-- State markers under `/var/lib/anonbox/` (`installed`, `anonbox-bin`, `last-iface-ip`) gate the hook.
+- `anonbox ensure-net` + `anonbox-net-ready.service`: wait for primary IPv4, reset Tor StartLimit, rebind NIC TransPort/DNSPort if needed, assert `/etc/resolv.conf` is `127.0.0.1` — runs `Before=tor@default` so Tor does not bind before DHCP.
+- dhcpcd `nohook resolv.conf` + exit-hook to start `anonbox-net-ready` (prevents dhcpcd rewriting resolv.conf away from Tor DNS).
+- `check`/`doctor` FAIL when resolv.conf is not Tor-only (`ensure-net` Fix).
 
 ### Changed
 
+- Tor unit drop-in: `After=`/`Wants=` `network-online.target` + `anonbox-net-ready.service`; `Restart=on-failure`; higher `StartLimitBurst`.
+- NM dispatcher skips `lo`, requires global IPv4 on the iface, and starts `anonbox-net-ready` (not ad-hoc `systemd-run sync-iface`).
+- NetworkManager hostname privacy keys: `ipv4/ipv6.dhcp-send-hostname=false` (replaces invalid `ethernet/wifi.dhcp-send-hostname`).
+- `anonbox sync-iface`: shared rebind core with `ensure-net`; still the manual DHCP-drift tool.
+
+### Added (prior)
+
+- `anonbox sync-iface`: rebind Tor `TransPort`/`DNSPort` NIC listens after DHCP/IP drift (rewrite torrc lines only, verify-config, restart Tor, assert listeners; rollback torrc on failure).
+- State markers under `/var/lib/anonbox/` (`installed`, `anonbox-bin`, `last-iface-ip`) gate hooks.
+
+### Changed (prior)
+
 - Docs: `--allow-ssh` persists in `/etc/nftables.conf` across reboot; re-setup without the flag removes it (README, SECURITY, ARCHITECTURE, THREAT_MODEL).
 - `check`/`doctor`/`status` IFACE_IP drift remediation points to `sync-iface` (or `setup` if torrc/nft missing).
-- ARCHITECTURE §6 / THREAT_MODEL / SECURITY document sync-iface + NM oneshot path.
+- ARCHITECTURE §6 / THREAT_MODEL / SECURITY document sync-iface + net-ready boot path.
 
 ## [1.2.2] - 2026-08-25
 

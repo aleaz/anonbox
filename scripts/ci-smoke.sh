@@ -28,16 +28,29 @@ grep -q 'torrc_transport_nic_ip' ./anonbox || fail "torrc_transport_nic_ip helpe
 grep -q 'warn_iface_ip_drift' ./anonbox || fail "warn_iface_ip_drift helper missing"
 grep -q 'IFACE_IP drift' ./anonbox || fail "IFACE_IP drift FAIL in check missing"
 grep -q 'cmd_sync_iface' ./anonbox || fail "cmd_sync_iface missing"
+grep -q 'cmd_ensure_net' ./anonbox || fail "cmd_ensure_net missing"
+grep -q 'ensure_tor_iface_ready' ./anonbox || fail "ensure_tor_iface_ready missing"
 grep -q 'rewrite_torrc_nic_binds' ./anonbox || fail "rewrite_torrc_nic_binds missing"
 grep -q '99-anonbox-sync-iface' ./anonbox || fail "NM sync dispatcher path missing"
+grep -q 'anonbox-net-ready.service' ./anonbox || fail "anonbox-net-ready.service missing"
 grep -q 'ANONBOX_INSTALLED_MARKER' ./anonbox || fail "ANONBOX_INSTALLED_MARKER missing"
 grep -q 'install_sync_iface_hook' ./anonbox || fail "install_sync_iface_hook missing"
 grep -q 'remove_sync_iface_hook' ./anonbox || fail "remove_sync_iface_hook missing"
-grep -q 'systemd-run' ./anonbox || fail "systemd-run oneshot enqueue missing"
+grep -q 'install_dhcpcd_dns_guard' ./anonbox || fail "dhcpcd DNS guard missing"
+grep -q 'nohook resolv.conf' ./anonbox || fail "dhcpcd nohook resolv.conf missing"
+grep -q 'assert_resolv_tor_dns' ./anonbox || fail "assert_resolv_tor_dns missing"
+grep -q 'After=network-online.target anonbox-net-ready.service' ./anonbox || fail "Tor drop-in After=net-ready missing"
 # sync-iface must not call full setup
-if awk '/^cmd_sync_iface\(\)/,/^cmd_rollback\(\)|^cmd_uninstall\(\)|^# =====/' ./anonbox | grep -q 'cmd_setup'; then
+if awk '/^cmd_sync_iface\(\)/,/^cmd_rollback\(\)|^cmd_uninstall\(\)|^cmd_ensure_net\(\)|^# =====/' ./anonbox | grep -q 'cmd_setup'; then
   fail "cmd_sync_iface must not call cmd_setup"
 fi
+if awk '/^cmd_ensure_net\(\)/,/^cmd_sync_iface\(\)|^# =====/' ./anonbox | grep -q 'cmd_setup'; then
+  fail "cmd_ensure_net must not call cmd_setup"
+fi
+# Dispatcher must never act on lo
+grep -q '!= "lo"' ./anonbox || fail "NM dispatcher must skip lo"
+# Prefer systemctl start net-ready (not ad-hoc systemd-run sync-iface)
+grep -q 'systemctl start --no-block anonbox-net-ready.service' ./anonbox || fail "dispatcher must start anonbox-net-ready"
 grep -q 'Preserving existing Bridge lines' ./anonbox || fail "bridge preserve on re-setup missing"
 grep -q 'baseline nftables accept' ./anonbox || fail "uninstall help must mention baseline nftables accept"
 # shellcheck disable=SC2016 # intentional literal "$ANONBOX_TOR_DEFAULTS" in source
@@ -140,7 +153,9 @@ pass "JSON/stderr stream isolation"
 ./anonbox check --help 2>&1 | grep -q 'no-kill-switch' || fail "check --help missing --no-kill-switch"
 ./anonbox doctor --help 2>&1 | grep -q 'doctor' || fail "doctor --help broken"
 ./anonbox help | grep -q 'sync-iface' || fail "help missing sync-iface"
+./anonbox help | grep -q 'ensure-net' || fail "help missing ensure-net"
 ./anonbox sync-iface --help 2>&1 | grep -q 'sync-iface' || fail "sync-iface --help broken"
+./anonbox ensure-net --help 2>&1 | grep -q 'ensure-net' || fail "ensure-net --help broken"
 pass "per-command help"
 
 # torrc NIC bind rewrite selftest (no root / no Tor)
@@ -173,11 +188,13 @@ fi
 pass "torrc NIC rewrite selftest"
 
 # Manual VM checklist (document for PR reviewers; not executed here):
-# 1. sudo ./anonbox setup → marker + dispatcher present
+# 1. sudo ./anonbox setup → marker + dispatcher + anonbox-net-ready enabled
 # 2. Simulate drift → check FAIL iface-drift
 # 3. sudo ./anonbox sync-iface → listeners OK; check clean of iface-drift
 # 4. sync-iface again → noop
-# 5. nmcli connection up / dhcp4-change → journal anonbox-sync-iface; NM not hung
-# 6. sudo ./anonbox uninstall --yes → dispatcher + markers gone
+# 5. nmcli connection up / dhcp4-change → journal starts anonbox-net-ready; NM not hung
+# 6. sudo reboot (DoD): tor@default active without re-running setup; listeners on NIC IP;
+#    resolv.conf nameserver 127.0.0.1; no StartLimit; check transparent/DNS PASS
+# 7. sudo ./anonbox uninstall --yes → unit + dispatcher + dhcpcd snippets + markers gone
 
 printf '\nAll CI smoke checks passed.\n'

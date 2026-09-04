@@ -46,7 +46,13 @@ ANONBOX_LAST_IFACE_IP="${ANONBOX_STATE_DIR}/last-iface-ip"
 ANONBOX_SYNC_LOCK="${ANONBOX_STATE_DIR}/sync-iface.lock"
 ANONBOX_LAST_SYNC_RESTART="${ANONBOX_STATE_DIR}/last-sync-restart"
 NM_SYNC_DISPATCHER="/etc/NetworkManager/dispatcher.d/99-anonbox-sync-iface"
+ANONBOX_NET_READY_UNIT="/etc/systemd/system/anonbox-net-ready.service"
+DHCPCD_ANONBOX_CONF="/etc/dhcpcd.conf.d/99-anonbox.conf"
+DHCPCD_EXIT_HOOK="/etc/dhcpcd.exit-hook"
 SYNC_IFACE_MIN_INTERVAL=60
+NET_READY_TIMEOUT=120
+SKIP_SYNC_RATE_LIMIT=0
+SYNC_ACTION=""
 
 LOGIN_DEFS="/etc/login.defs"
 PAM_COMMON_SESSION="/etc/pam.d/common-session"
@@ -1143,12 +1149,20 @@ EOF
 
     backup_file "$TOR_UNIT_DROPIN"
     run tee "$TOR_UNIT_DROPIN" > /dev/null << EOF
+[Unit]
+After=network-online.target anonbox-net-ready.service
+Wants=network-online.target anonbox-net-ready.service
+
 [Service]
 ExecStartPre=
 ExecStart=
 ExecStartPre=/usr/bin/install -Z -m 02755 -o ${TOR_USER} -g ${TOR_USER} -d /run/tor
 ExecStartPre=/usr/bin/tor --defaults-torrc ${ANONBOX_TOR_DEFAULTS} -f /etc/tor/torrc --RunAsDaemon 0 --verify-config
 ExecStart=/usr/bin/tor --defaults-torrc ${ANONBOX_TOR_DEFAULTS} -f /etc/tor/torrc --RunAsDaemon 0
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=15
 EOF
     run chmod 644 "$TOR_UNIT_DROPIN"
     record_touched_file "$TOR_UNIT_DROPIN"
@@ -1299,15 +1313,350 @@ wait_for_tor_listeners()
     assert_tor_listeners
 }
 
-# Install marker + NM dispatcher that only enqueues a systemd oneshot.
+# Soft probe: set IFACE/IFACE_IP when a non-loopback global IPv4 exists. Never dies.
+probe_primary_ipv4()
+{
+    local cand_iface cand_cidr cand_ip
+    IFACE=""
+    IFACE_IP=""
+    LAN_SUBNET=""
+
+    if [[ -n "$FORCE_IFACE" ]]; then
+        cand_iface="$FORCE_IFACE"
+    else
+        cand_iface="$(ip route show default 2>/dev/null | awk '/default/ { print $5; exit }' || true)"
+    fi
+    if [[ -z "$cand_iface" || "$cand_iface" == "lo" ]]; then
+        # Prefer first non-lo iface that has a global IPv4.
+        cand_iface="$(ip -4 -o addr show scope global 2>/dev/null \
+            | awk '{ print $2; exit }' || true)"
+    fi
+    [[ -n "$cand_iface" && "$cand_iface" != "lo" ]] || return 1
+
+    cand_cidr="$(ip -4 addr show dev "$cand_iface" scope global 2>/dev/null \
+        | awk '/inet / { print $2; exit }' || true)"
+    [[ -n "$cand_cidr" ]] || return 1
+    cand_ip="${cand_cidr%%/*}"
+    is_ipv4 "$cand_ip" || return 1
+
+    IFACE="$cand_iface"
+    IFACE_IP="$cand_ip"
+    LAN_SUBNET="$cand_cidr"
+    return 0
+}
+
+wait_for_primary_ipv4()
+{
+    local timeout="${1:-$NET_READY_TIMEOUT}"
+    local waited=0
+    while (( waited < timeout )); do
+        if probe_primary_ipv4; then
+            return 0
+        fi
+        sleep 2
+        (( waited += 2 )) || true
+    done
+    return 1
+}
+
+assert_resolv_tor_dns()
+{
+    [[ -f /etc/resolv.conf ]] || return 1
+    grep -Eq '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.1([[:space:]]|$)' /etc/resolv.conf \
+        || return 1
+    # Fail if any non-loopback nameserver is present (dhcpcd rewrite).
+    if grep -E '^[[:space:]]*nameserver[[:space:]]+' /etc/resolv.conf 2>/dev/null \
+        | grep -Ev '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.1([[:space:]]|$)' \
+        | grep -q .; then
+        return 1
+    fi
+    return 0
+}
+
+apply_resolv_tor_dns()
+{
+    if (( DRY_RUN == 1 )); then
+        info "[DRY-RUN] Would set /etc/resolv.conf nameserver 127.0.0.1"
+        return 0
+    fi
+    rm -f /etc/resolv.conf
+    tee /etc/resolv.conf > /dev/null << 'EOF'
+nameserver 127.0.0.1
+options edns0
+EOF
+    chmod 644 /etc/resolv.conf 2>/dev/null || true
+}
+
+# Rewrite/restart Tor NIC binds when needed. Assumes IFACE_IP set and flock held.
+# Sets SYNC_ACTION to noop|updated|restart. Returns 0 on success, 1 on failure.
+# When Tor is not yet started (boot, Before=tor@default), only rewrite torrc —
+# do not start/restart; systemd starts Tor after anonbox-net-ready finishes.
+apply_tor_nic_rebind()
+{
+    local old_ip new_ip live_bind tmp_torrc restore_copy eff_defaults tor_running
+    SYNC_ACTION="noop"
+    new_ip="$IFACE_IP"
+    old_ip="$(torrc_transport_nic_ip "$TORRC")"
+    live_bind="$(ss_transport_nic_ip)"
+    tor_running=0
+    if systemctl is-active --quiet tor@default.service 2>/dev/null \
+        || systemctl is-failed --quiet tor@default.service 2>/dev/null; then
+        tor_running=1
+    fi
+
+    if [[ -z "$old_ip" ]]; then
+        fail "Could not parse NIC TransPort from $TORRC"
+        return 1
+    fi
+
+    if [[ "$old_ip" == "$new_ip" ]]; then
+        if (( tor_running == 0 )); then
+            # Boot: torrc already matches; leave Tor start to systemd (After=net-ready).
+            printf '%s\n' "$new_ip" > "$ANONBOX_LAST_IFACE_IP" 2>/dev/null || true
+            SYNC_ACTION="noop"
+            return 0
+        fi
+        if [[ "$live_bind" == "$new_ip" ]]; then
+            printf '%s\n' "$new_ip" > "$ANONBOX_LAST_IFACE_IP" 2>/dev/null || true
+            SYNC_ACTION="noop"
+            return 0
+        fi
+        # Runtime: torrc OK but live listeners stale — fall through to restart.
+    fi
+
+    tmp_torrc="$(anonbox_mktemp)"
+    restore_copy="$(anonbox_mktemp)"
+    TMP_FILES+=("$tmp_torrc" "$restore_copy")
+    cp -a "$TORRC" "$restore_copy"
+
+    if [[ "$old_ip" != "$new_ip" ]]; then
+        if ! rewrite_torrc_nic_binds "$TORRC" "$tmp_torrc" "$old_ip" "$new_ip"; then
+            fail "Failed to rewrite NIC TransPort/DNSPort binds in torrc"
+            return 1
+        fi
+        assert_torrc_safe_binds "$tmp_torrc"
+
+        eff_defaults="$(effective_tor_defaults)"
+        if [[ -f "$eff_defaults" ]]; then
+            if ! tor --defaults-torrc "$eff_defaults" -f "$tmp_torrc" --verify-config >/dev/null 2>&1; then
+                fail "tor --verify-config failed for rewritten torrc"
+                return 1
+            fi
+        elif ! tor -f "$tmp_torrc" --verify-config >/dev/null 2>&1; then
+            fail "tor --verify-config failed for rewritten torrc"
+            return 1
+        fi
+
+        backup_file "$TORRC"
+        cp "$tmp_torrc" "$TORRC"
+        chown root:"$TOR_USER" "$TORRC" 2>/dev/null || true
+        chmod 640 "$TORRC"
+        SYNC_ACTION="updated"
+        ok "Rewrote torrc NIC binds: ${old_ip} -> ${new_ip}"
+    else
+        SYNC_ACTION="restart"
+        info "torrc NIC bind already ${new_ip}; will refresh Tor listeners"
+        cp -a "$TORRC" "$tmp_torrc"
+    fi
+
+    # Cold boot: torrc is correct; systemd starts Tor after this unit.
+    if (( tor_running == 0 )); then
+        printf '%s\n' "$new_ip" > "$ANONBOX_LAST_IFACE_IP" 2>/dev/null || true
+        return 0
+    fi
+
+    if ! systemctl restart tor@default.service; then
+        warn "Tor restart failed; restoring previous torrc"
+        cp -a "$restore_copy" "$TORRC"
+        chown root:"$TOR_USER" "$TORRC" 2>/dev/null || true
+        chmod 640 "$TORRC"
+        systemctl restart tor@default.service 2>/dev/null || true
+        return 1
+    fi
+
+    if ! ( wait_for_tor_listeners ); then
+        warn "Listeners not healthy after sync; restoring previous torrc"
+        cp -a "$restore_copy" "$TORRC"
+        chown root:"$TOR_USER" "$TORRC" 2>/dev/null || true
+        chmod 640 "$TORRC"
+        systemctl restart tor@default.service 2>/dev/null || true
+        ( wait_for_tor_listeners ) 2>/dev/null || true
+        return 1
+    fi
+
+    date +%s > "$ANONBOX_LAST_SYNC_RESTART" 2>/dev/null || true
+    printf '%s\n' "$new_ip" > "$ANONBOX_LAST_IFACE_IP" 2>/dev/null || true
+    return 0
+}
+
+# Boot/runtime contract: wait for primary IPv4, clear StartLimit, rebind Tor, assert DNS.
+ensure_tor_iface_ready()
+{
+    local wait_ip="${1:-1}"
+    local old_ip new_ip
+
+    if (( wait_ip == 1 )); then
+        info "Waiting up to ${NET_READY_TIMEOUT}s for primary IPv4..."
+        if ! wait_for_primary_ipv4 "$NET_READY_TIMEOUT"; then
+            fail "No primary IPv4 within ${NET_READY_TIMEOUT}s"
+            return 1
+        fi
+        # Full detect after soft probe (sets TOR_USER etc.).
+        detect_network
+    else
+        detect_network
+        if [[ -z "$IFACE_IP" ]] || ! is_ipv4 "$IFACE_IP"; then
+            fail "Could not detect a valid primary IPv4 on ${IFACE:-unknown}."
+            return 1
+        fi
+    fi
+
+    if [[ ! -f "$TORRC" ]]; then
+        fail "$TORRC missing"
+        return 1
+    fi
+
+    local tp_count dns_count
+    tp_count="$(torrc_count_nic_transport_lines "$TORRC" | tr -d '[:space:]')"
+    dns_count="$(torrc_count_nic_dnsport_lines "$TORRC" | tr -d '[:space:]')"
+    if [[ "$tp_count" != "1" || "$dns_count" != "1" ]]; then
+        fail "torrc must have exactly one NIC TransPort and one NIC DNSPort"
+        return 1
+    fi
+
+    local tables
+    tables="$(nft list tables 2>/dev/null || true)"
+    if [[ "$tables" != *"tor_nat"* || "$tables" != *"tor_filter"* ]]; then
+        fail "nftables tor_nat/tor_filter not loaded"
+        return 1
+    fi
+
+    systemctl reset-failed tor@default.service 2>/dev/null || true
+
+    mkdir -p "$ANONBOX_STATE_DIR" 2>/dev/null || true
+    exec 9>"$ANONBOX_SYNC_LOCK"
+    if ! flock -n 9; then
+        warn "Another sync/ensure-net is in progress; skipping"
+        return 0
+    fi
+
+    old_ip="$(torrc_transport_nic_ip "$TORRC")"
+    new_ip="$IFACE_IP"
+
+    if ! apply_tor_nic_rebind; then
+        return 1
+    fi
+
+    apply_resolv_tor_dns
+    if ! assert_resolv_tor_dns; then
+        fail "/etc/resolv.conf is not Tor-only (expected nameserver 127.0.0.1)"
+        return 1
+    fi
+
+    if [[ "${SYNC_ACTION:-noop}" != "noop" ]]; then
+        info "Tor rebound ${old_ip} -> ${new_ip} (${SYNC_ACTION})"
+    else
+        ok "Tor NIC binds and DNS already ready (${new_ip})"
+    fi
+    return 0
+}
+
+anonbox_bin_path()
+{
+    realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null \
+        || readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null \
+        || printf '%s\n' "${BASH_SOURCE[0]:-$0}"
+}
+
+install_dhcpcd_dns_guard()
+{
+    if (( DRY_RUN == 1 )); then
+        info "[DRY-RUN] Would install dhcpcd nohook resolv.conf + exit-hook"
+        return 0
+    fi
+    # Prefer drop-in dir when present (Debian dhcpcd).
+    if [[ -d /etc/dhcpcd.conf.d ]] || mkdir -p /etc/dhcpcd.conf.d 2>/dev/null; then
+        backup_file "$DHCPCD_ANONBOX_CONF"
+        tee "$DHCPCD_ANONBOX_CONF" > /dev/null << 'EOF'
+# anonbox: do not let dhcpcd rewrite /etc/resolv.conf (Tor DNSPort owns DNS).
+nohook resolv.conf
+EOF
+        chmod 644 "$DHCPCD_ANONBOX_CONF" 2>/dev/null || true
+        record_touched_file "$DHCPCD_ANONBOX_CONF"
+    fi
+    if [[ -f /etc/dhcpcd.conf ]]; then
+        backup_file /etc/dhcpcd.conf
+        if ! grep -Eq '^[[:space:]]*nohook[[:space:]]+resolv\.conf' /etc/dhcpcd.conf 2>/dev/null; then
+            printf '\n# anonbox: Tor owns /etc/resolv.conf\nnohook resolv.conf\n' >> /etc/dhcpcd.conf
+        fi
+        if [[ -d /etc/dhcpcd.conf.d ]] \
+            && ! grep -Eq '^[[:space:]]*include[[:space:]]+/etc/dhcpcd\.conf\.d/\*' /etc/dhcpcd.conf 2>/dev/null; then
+            printf '\n# anonbox: include drop-ins\ninclude /etc/dhcpcd.conf.d/*\n' >> /etc/dhcpcd.conf
+        fi
+        record_touched_file /etc/dhcpcd.conf
+    fi
+
+    backup_file "$DHCPCD_EXIT_HOOK"
+    tee "$DHCPCD_EXIT_HOOK" > /dev/null << 'EOF'
+#!/bin/sh
+# anonbox: after dhcpcd lease events, ensure Tor net-ready (DNS + TransPort binds).
+# Generated by anonbox — removed by uninstall.
+case "${reason:-}" in
+    BOUND|RENEW|REBIND|REBOOT|IPV4LL) ;;
+    *) exit 0 ;;
+esac
+[ -f /var/lib/anonbox/installed ] || exit 0
+systemctl start --no-block anonbox-net-ready.service 2>/dev/null || true
+exit 0
+EOF
+    chmod 755 "$DHCPCD_EXIT_HOOK" 2>/dev/null || true
+    record_touched_file "$DHCPCD_EXIT_HOOK"
+    ok "Installed dhcpcd DNS ownership guard"
+}
+
+install_net_ready_unit()
+{
+    local bin="$1"
+    if (( DRY_RUN == 1 )); then
+        info "[DRY-RUN] Would install anonbox-net-ready.service"
+        return 0
+    fi
+    tee "$ANONBOX_NET_READY_UNIT" > /dev/null << EOF
+[Unit]
+Description=anonbox: wait for primary IPv4 and prepare Tor TransPort/DNS
+Documentation=https://github.com/aleaz/anonbox
+After=network-online.target nftables.service
+Wants=network-online.target
+Before=tor@default.service
+ConditionPathExists=${ANONBOX_INSTALLED_MARKER}
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${bin} ensure-net --quiet
+TimeoutStartSec=$(( NET_READY_TIMEOUT + 60 ))
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 644 "$ANONBOX_NET_READY_UNIT"
+    record_touched_file "$ANONBOX_NET_READY_UNIT"
+    systemctl daemon-reload
+    systemctl enable anonbox-net-ready.service 2>/dev/null || true
+    # Prefer wait-online so network-online.target is meaningful on NM hosts.
+    systemctl enable NetworkManager-wait-online.service 2>/dev/null || true
+    ok "Installed anonbox-net-ready.service (Before=tor@default)"
+}
+
+# Install marker, net-ready unit, NM dispatcher, dhcpcd guard.
 install_sync_iface_hook()
 {
     if (( DRY_RUN == 1 )); then
-        info "[DRY-RUN] Would install sync-iface marker and NetworkManager dispatcher"
+        info "[DRY-RUN] Would install sync-iface / ensure-net boot hooks"
         return 0
     fi
     local bin
-    bin="$(realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || printf '%s\n' "${BASH_SOURCE[0]:-$0}")"
+    bin="$(anonbox_bin_path)"
     run mkdir -p "$ANONBOX_STATE_DIR"
     run mkdir -p /etc/NetworkManager/dispatcher.d 2>/dev/null || true
     printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ANONBOX_INSTALLED_MARKER"
@@ -1317,12 +1666,14 @@ install_sync_iface_hook()
     fi
     chmod 644 "$ANONBOX_INSTALLED_MARKER" "$ANONBOX_BIN_FILE" 2>/dev/null || true
 
+    install_net_ready_unit "$bin"
+    install_dhcpcd_dns_guard
+
     cat > "$NM_SYNC_DISPATCHER" << EOF
 #!/bin/sh
-# anonbox: enqueue sync-iface on DHCP/primary IP changes (must not block NetworkManager).
+# anonbox: start net-ready on real NIC DHCP/up (must not block NetworkManager).
 # Generated by anonbox v${VERSION} — do not edit; removed by uninstall.
 MARKER="${ANONBOX_INSTALLED_MARKER}"
-BINFILE="${ANONBOX_BIN_FILE}"
 IFACE="\$1"
 ACTION="\$2"
 
@@ -1332,36 +1683,40 @@ case "\$ACTION" in
 esac
 
 [ -f "\$MARKER" ] || exit 0
-[ -f "\$BINFILE" ] || exit 0
-BIN="\$(cat "\$BINFILE" 2>/dev/null)"
-[ -n "\$BIN" ] && [ -x "\$BIN" ] || exit 0
+
+# Never act on loopback or empty iface (early boot fires up on lo).
+[ -n "\$IFACE" ] || exit 0
+[ "\$IFACE" != "lo" ] || exit 0
+
+# Require a global IPv4 on this iface (skip premature up).
+ip -4 addr show dev "\$IFACE" scope global 2>/dev/null | grep -q 'inet ' || exit 0
 
 DEF_IFACE="\$(ip route show default 2>/dev/null | awk '/default/ { print \$5; exit }')"
 if [ -n "\$DEF_IFACE" ] && [ "\$IFACE" != "\$DEF_IFACE" ]; then
     exit 0
 fi
 
-logger -t anonbox-sync-iface "enqueue sync-iface after \$ACTION on \$IFACE"
-# Never stop an in-progress sync (would skip torrc rollback mid-restart).
-if systemctl is-active --quiet anonbox-sync-iface.service 2>/dev/null; then
-    logger -t anonbox-sync-iface "sync already active; skip enqueue"
-    exit 0
-fi
-systemctl reset-failed anonbox-sync-iface.service 2>/dev/null || true
-systemd-run --collect --unit=anonbox-sync-iface.service "\$BIN" sync-iface --quiet \\
-    >/dev/null 2>&1 || logger -t anonbox-sync-iface "systemd-run failed (is systemd available?)"
+logger -t anonbox-sync-iface "start anonbox-net-ready after \$ACTION on \$IFACE"
+systemctl start --no-block anonbox-net-ready.service 2>/dev/null \\
+    || logger -t anonbox-sync-iface "failed to start anonbox-net-ready.service"
 exit 0
 EOF
     run chmod 755 "$NM_SYNC_DISPATCHER"
     record_touched_file "$NM_SYNC_DISPATCHER"
     record_touched_file "$ANONBOX_INSTALLED_MARKER"
     record_touched_file "$ANONBOX_BIN_FILE"
+    # Persist Tor enable so reboot uses the drop-in ordering.
+    run systemctl enable tor@default.service 2>/dev/null || true
     ok "Installed IFACE_IP sync hook: $NM_SYNC_DISPATCHER"
 }
 
 remove_sync_iface_hook()
 {
+    systemctl disable --now anonbox-net-ready.service 2>/dev/null || true
+    run rm -f "$ANONBOX_NET_READY_UNIT"
     run rm -f "$NM_SYNC_DISPATCHER"
+    run rm -f "$DHCPCD_ANONBOX_CONF"
+    run rm -f "$DHCPCD_EXIT_HOOK"
     run rm -f "$ANONBOX_INSTALLED_MARKER"
     run rm -f "$ANONBOX_BIN_FILE"
     run rm -f "$ANONBOX_LAST_IFACE_IP"
@@ -1369,6 +1724,7 @@ remove_sync_iface_hook()
     run rm -f "$ANONBOX_LAST_SYNC_RESTART"
     systemctl reset-failed anonbox-sync-iface.service 2>/dev/null || true
     systemctl stop anonbox-sync-iface.service 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
 }
 
 effective_tor_defaults()
@@ -2014,6 +2370,9 @@ options edns0
 EOF
     ok "DNS fixed to 127.0.0.1 (Tor local resolver; systemd-resolved masked)"
 
+    # Boot contract: net-ready must exist before Tor starts (drop-in Wants=).
+    install_sync_iface_hook
+
     # 8. Enable nftables and start Tor (fail-hard)
     step "8. Enabling nftables and starting Tor"
     # Live rules already loaded via single nft -f above; avoid restart (empty window).
@@ -2031,8 +2390,6 @@ EOF
     record_touched_file "$LOCALNET_SYSCTL"
     record_touched_file "$APPARMOR_TOR_LOCAL"
     record_touched_file "$TOUCHED_MANIFEST"
-
-    install_sync_iface_hook
 
     if (( IN_PIPELINE == 0 )); then
         print_result_card "setup" "complete" \
@@ -2339,8 +2696,8 @@ wifi.scan-rand-mac-address=yes
 [connection]
 ethernet.cloned-mac-address=random
 wifi.cloned-mac-address=random
-ethernet.dhcp-send-hostname=false
-wifi.dhcp-send-hostname=false
+ipv4.dhcp-send-hostname=false
+ipv6.dhcp-send-hostname=false
 EOF
     info "MAC: NetworkManager cloned-mac=random only (no macchanger). Useless as anti-FP under typical NAT."
 
@@ -2615,6 +2972,12 @@ except Exception:
     fi
 
     section "4" "Testing DNS Leak Prevention"
+    if assert_resolv_tor_dns; then
+        pass "/etc/resolv.conf uses nameserver 127.0.0.1 only"
+    else
+        fail_fix "/etc/resolv.conf is not Tor-only (expected nameserver 127.0.0.1)" \
+            "sudo ./anonbox ensure-net" "resolv" "leak"
+    fi
     if command -v dig >/dev/null 2>&1; then
         local dns_ip
         dns_ip="$(dig +short @127.0.0.1 -p 5353 whoami.akamai.net 2>/dev/null | grep -v ';;' | head -n 1 || echo '')"
@@ -3020,6 +3383,13 @@ cmd_doctor()
         pass "Primary IPv4 ${IFACE_IP} looks consistent with TransPort binds"
     fi
 
+    if assert_resolv_tor_dns; then
+        pass "/etc/resolv.conf uses nameserver 127.0.0.1 only"
+    else
+        fail_fix "/etc/resolv.conf is not Tor-only (expected nameserver 127.0.0.1)" \
+            "sudo ./anonbox ensure-net" "resolv" "leak"
+    fi
+
     if storage_encrypted; then
         pass "Encrypted storage detected (LUKS/eCryptfs)"
     else
@@ -3160,6 +3530,49 @@ cmd_status()
 }
 
 # =============================================================================
+# SUBCOMMAND: ensure-net
+# =============================================================================
+
+cmd_ensure_net()
+{
+    step "anonbox ensure-net (wait for IPv4, prepare Tor TransPort/DNS, assert resolv.conf)"
+
+    if (( DRY_RUN == 0 )); then
+        require_root
+    fi
+
+    if (( DRY_RUN == 1 )); then
+        info "[DRY-RUN] Would wait for primary IPv4, rebind Tor NIC ports if needed, assert DNS"
+        if (( JSON_OUT == 1 )); then
+            printf '{"command":"ensure-net","action":"dry-run","verdict":"OK","exit_code":0}\n'
+        else
+            print_result_card "ensure-net" "dry-run" "wait IPv4 + Tor + resolv"
+        fi
+        return 0
+    fi
+
+    SKIP_SYNC_RATE_LIMIT=1
+    if ! ensure_tor_iface_ready 1; then
+        if (( JSON_OUT == 1 )); then
+            printf '{"command":"ensure-net","action":"error","verdict":"FAIL","exit_code":1}\n'
+        fi
+        die "ensure-net failed (Tor may be unable to bind until network/DNS is fixed)"
+    fi
+
+    if (( JSON_OUT == 1 )); then
+        printf '{"command":"ensure-net","action":"%s","iface":"%s","ip":"%s","verdict":"OK","exit_code":0}\n' \
+            "$(json_escape "${SYNC_ACTION:-noop}")" \
+            "$(json_escape "${IFACE:-}")" \
+            "$(json_escape "${IFACE_IP:-}")"
+    else
+        print_result_card "ensure-net" "ready" \
+            "${IFACE:-?} ${IFACE_IP:-?}" \
+            "sudo ./anonbox check"
+    fi
+    return 0
+}
+
+# =============================================================================
 # SUBCOMMAND: sync-iface
 # =============================================================================
 
@@ -3214,11 +3627,10 @@ cmd_sync_iface()
         fi
     fi
 
-    local old_ip live_bind new_ip action
+    local old_ip live_bind new_ip
     old_ip="$(torrc_transport_nic_ip "$TORRC")"
     live_bind="$(ss_transport_nic_ip)"
     new_ip="$IFACE_IP"
-    action="noop"
 
     if [[ -z "$old_ip" ]]; then
         if (( JSON_OUT == 1 )); then
@@ -3231,6 +3643,7 @@ cmd_sync_iface()
         if (( DRY_RUN == 0 )); then
             mkdir -p "$ANONBOX_STATE_DIR" 2>/dev/null || true
             printf '%s\n' "$new_ip" > "$ANONBOX_LAST_IFACE_IP" 2>/dev/null || true
+            apply_resolv_tor_dns
         fi
         ok "Already in sync: TransPort/DNSPort NIC bind is ${new_ip}"
         if (( JSON_OUT == 1 )); then
@@ -3254,8 +3667,8 @@ cmd_sync_iface()
         return 0
     fi
 
-    # Rate-limit restarts (NM MAC/DHCP flaps).
-    if [[ -f "$ANONBOX_LAST_SYNC_RESTART" ]]; then
+    # Rate-limit restarts (NM MAC/DHCP flaps) unless boot path set SKIP_SYNC_RATE_LIMIT.
+    if (( SKIP_SYNC_RATE_LIMIT == 0 )) && [[ -f "$ANONBOX_LAST_SYNC_RESTART" ]]; then
         local last_ts now_ts
         last_ts="$(tr -d '[:space:]' < "$ANONBOX_LAST_SYNC_RESTART" 2>/dev/null || echo 0)"
         now_ts="$(date +%s)"
@@ -3278,81 +3691,20 @@ cmd_sync_iface()
         return 0
     fi
 
-    local tmp_torrc restore_copy
-    tmp_torrc="$(anonbox_mktemp)"
-    restore_copy="$(anonbox_mktemp)"
-    TMP_FILES+=("$tmp_torrc" "$restore_copy")
-    cp -a "$TORRC" "$restore_copy"
-
-    if [[ "$old_ip" != "$new_ip" ]]; then
-        if ! rewrite_torrc_nic_binds "$TORRC" "$tmp_torrc" "$old_ip" "$new_ip"; then
-            if (( JSON_OUT == 1 )); then
-                emit_sync_iface_json "error" "$old_ip" "$new_ip" "FAIL" 1
-            fi
-            die "Failed to rewrite NIC TransPort/DNSPort binds in torrc"
-        fi
-        assert_torrc_safe_binds "$tmp_torrc"
-
-        local eff_defaults
-        eff_defaults="$(effective_tor_defaults)"
-        if [[ -f "$eff_defaults" ]]; then
-            if ! tor --defaults-torrc "$eff_defaults" -f "$tmp_torrc" --verify-config >/dev/null 2>&1; then
-                if (( JSON_OUT == 1 )); then
-                    emit_sync_iface_json "error" "$old_ip" "$new_ip" "FAIL" 1
-                fi
-                die "tor --verify-config failed for rewritten torrc"
-            fi
-        elif ! tor -f "$tmp_torrc" --verify-config >/dev/null 2>&1; then
-            if (( JSON_OUT == 1 )); then
-                emit_sync_iface_json "error" "$old_ip" "$new_ip" "FAIL" 1
-            fi
-            die "tor --verify-config failed for rewritten torrc"
-        fi
-
-        backup_file "$TORRC"
-        cp "$tmp_torrc" "$TORRC"
-        chown root:"$TOR_USER" "$TORRC" 2>/dev/null || true
-        chmod 640 "$TORRC"
-        action="updated"
-        ok "Rewrote torrc NIC binds: ${old_ip} -> ${new_ip}"
-    else
-        action="restart"
-        info "torrc NIC bind already ${new_ip}; restarting Tor to refresh live listeners"
-        cp -a "$TORRC" "$tmp_torrc"
-    fi
-
-    if ! systemctl restart tor@default.service; then
-        warn "Tor restart failed; restoring previous torrc"
-        cp -a "$restore_copy" "$TORRC"
-        chown root:"$TOR_USER" "$TORRC" 2>/dev/null || true
-        chmod 640 "$TORRC"
-        systemctl restart tor@default.service 2>/dev/null || true
+    systemctl reset-failed tor@default.service 2>/dev/null || true
+    if ! apply_tor_nic_rebind; then
         if (( JSON_OUT == 1 )); then
-            emit_sync_iface_json "$action" "$old_ip" "$new_ip" "FAIL" 1
+            emit_sync_iface_json "${SYNC_ACTION:-error}" "$old_ip" "$new_ip" "FAIL" 1
         fi
-        die "Failed to restart tor@default.service after sync-iface"
+        die "Failed to sync Tor NIC binds (torrc restored on failure). Traffic should DROP until fixed."
     fi
+    apply_resolv_tor_dns
 
-    if ! ( wait_for_tor_listeners ); then
-        warn "Listeners not healthy after sync; restoring previous torrc"
-        cp -a "$restore_copy" "$TORRC"
-        chown root:"$TOR_USER" "$TORRC" 2>/dev/null || true
-        chmod 640 "$TORRC"
-        systemctl restart tor@default.service 2>/dev/null || true
-        ( wait_for_tor_listeners ) 2>/dev/null || true
-        if (( JSON_OUT == 1 )); then
-            emit_sync_iface_json "$action" "$old_ip" "$new_ip" "FAIL" 1
-        fi
-        die "Tor listeners failed after sync-iface (torrc restored). Traffic should DROP until fixed."
-    fi
-
-    date +%s > "$ANONBOX_LAST_SYNC_RESTART" 2>/dev/null || true
-    printf '%s\n' "$new_ip" > "$ANONBOX_LAST_IFACE_IP" 2>/dev/null || true
     info "Tor restarted to rebind TransPort/DNSPort; traffic may drop briefly until circuits rebuild"
     ok "sync-iface complete: ${old_ip} -> ${new_ip}"
 
     if (( JSON_OUT == 1 )); then
-        emit_sync_iface_json "$action" "$old_ip" "$new_ip" "OK" 0
+        emit_sync_iface_json "${SYNC_ACTION:-updated}" "$old_ip" "$new_ip" "OK" 0
     else
         print_result_card "sync-iface" "complete" \
             "${old_ip} -> ${new_ip}" \
@@ -3586,6 +3938,7 @@ Commands:
   doctor      Read-only diagnostics with Fix hints (no kill-switch, no live leak curls)
   all         Execute full pipeline: setup -> harden -> check
   status      Show current Tor connection health, circuits, and public exit IP
+  ensure-net  Wait for primary IPv4, prepare Tor binds, assert resolv.conf (boot contract)
   sync-iface  Rebind Tor TransPort/DNSPort to the live primary IPv4 (DHCP / IP drift)
   rollback    Restore a snapshot from /var/backups/anonbox/ (--snapshot ID or interactive)
   uninstall   Restore clearnet with baseline nftables accept policy (not an empty ruleset)
@@ -3599,7 +3952,7 @@ Global options:
   --yes, -y             Assume yes for prompts (SSH preflight, uninstall/rollback)
   --quiet, -q, --silent
                         Suppress PASS/OK/info; still print FAIL/WARN and the result card
-  --json                Machine-readable report on stdout (check, doctor, status, sync-iface)
+  --json                Machine-readable report on stdout (check, doctor, status, sync-iface, ensure-net)
   --color MODE          auto (default), always, or never (also --color=auto|always|never)
   --no-color            Disable ANSI colors (also NO_COLOR=1, TERM=dumb; FORCE_COLOR enables in auto)
   --log-file NAME       Session log basename under /var/log/anonbox/ only (no absolute paths)
@@ -3622,6 +3975,7 @@ Examples:
   sudo ./anonbox check --no-kill-switch
   sudo ./anonbox doctor
   sudo ./anonbox check --json --quiet
+  sudo ./anonbox ensure-net
   sudo ./anonbox sync-iface
   sudo ./anonbox uninstall --yes
 EOF
@@ -3700,8 +4054,22 @@ Options: --iface IFACE | --json | --quiet | --silent | --dry-run | --verbose
 
 Rewrites only NIC TransPort/DNSPort lines in torrc, verifies config, restarts
 tor@default, and asserts listeners. Does not regenerate nftables or run setup.
-NetworkManager dispatcher (installed by setup) enqueues this via systemd-run.
+Prefer ensure-net after reboot; sync-iface for manual drift repair.
+NetworkManager / dhcpcd hooks start anonbox-net-ready.service (ensure-net).
 Exit codes: 0=ok/noop/rate-limited/locked, 1=remediation failed, 2=preconditions (missing torrc/nft/IP).
+EOF
+            ;;
+        ensure-net)
+            cat << EOF
+anonbox ensure-net — Boot/runtime network readiness for Tor
+
+Usage: sudo ./anonbox ensure-net [options]
+Options: --iface IFACE | --json | --quiet | --silent | --dry-run | --verbose
+         --no-color | --color MODE | --log-file PATH | --no-log
+
+Waits for a non-loopback primary IPv4, resets tor@default StartLimit, rebinds
+NIC TransPort/DNSPort if needed, and asserts /etc/resolv.conf is 127.0.0.1.
+Installed as anonbox-net-ready.service (Before=tor@default) by setup.
 EOF
             ;;
         uninstall)
@@ -3864,7 +4232,7 @@ main()
     fi
 
     case "$command" in
-        setup|harden|check|doctor|all|rollback|uninstall|sync-iface)
+        setup|harden|check|doctor|all|rollback|uninstall|sync-iface|ensure-net)
             start_session_log
             ;;
     esac
@@ -3876,6 +4244,7 @@ main()
         doctor)     cmd_doctor; return $? ;;
         all)        cmd_all; return $? ;;
         status)     cmd_status; return $? ;;
+        ensure-net) cmd_ensure_net; return $? ;;
         sync-iface) cmd_sync_iface; return $? ;;
         rollback)   cmd_rollback ;;
         uninstall)  cmd_uninstall ;;

@@ -8,7 +8,7 @@ _anonbox()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD - 1]}"
-    commands="setup harden check doctor all status sync-iface rollback uninstall version help"
+    commands="setup harden check doctor all status ensure-net sync-iface rollback uninstall version help"
     opts="--bridges-file --no-bridges --iface --snapshot --allow-ssh --yes -y --no-kill-switch --quiet -q --silent --json --no-color --color --log-file --no-log --verbose -v --dry-run --help -h"
 
     if [[ ${COMP_CWORD} -eq 1 ]]; then

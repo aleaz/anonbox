@@ -176,12 +176,14 @@ For operation in heavily filtered networks (such as state-level DPI firewalls), 
 > * **Throwaway** / discard disk / revert [hypervisor snapshot](HYPERVISORS.md) → encryption optional.
 > * `anonbox check` reports **SAFE** only when LUKS or eCryptfs is detected (`FAIL` if missing). Without a passphrase, cleartext disk images on the host remain readable.
 
-## 6. IFACE_IP / TransPort drift
+## 6. IFACE_IP / TransPort drift and reboot readiness
 
-Tor `TransPort`/`DNSPort` bind the NIC primary IPv4 at setup time. If DHCP or hypervisor NAT changes that address, nft `redirect` delivers to the new primary IP while Tor may still listen on the stale bind.
+Tor `TransPort`/`DNSPort` bind the NIC primary IPv4 at setup time. If DHCP or hypervisor NAT changes that address, nft `redirect` delivers to the new primary IP while Tor may still listen on the stale bind. Separately, at reboot Tor can start before DHCP assigns the address (`Cannot assign requested address`), exhaust StartLimit, and stay failed. dhcpcd may also rewrite `/etc/resolv.conf` away from `127.0.0.1`.
 
-**Remediation:** `sudo ./anonbox sync-iface` rewrites only the NIC `TransPort`/`DNSPort` lines in `/etc/tor/torrc`, runs `tor --verify-config`, restarts `tor@default`, and asserts listeners. It does **not** regenerate nftables or re-run full `setup`.
+**Boot contract:** `setup` installs `anonbox-net-ready.service` (`WantedBy=multi-user.target`, `Before=tor@default`, `After=network-online` + nftables). It runs `anonbox ensure-net`: wait for non-loopback primary IPv4, `systemctl reset-failed tor@default`, rewrite NIC binds only if needed, assert `/etc/resolv.conf` is Tor-only. The Tor unit drop-in `Wants=`/`After=` that unit and uses `Restart=on-failure` with a higher StartLimitBurst. nftables early-boot (`Before=network-pre`) is unchanged.
 
-**Automation:** `setup` installs `/etc/NetworkManager/dispatcher.d/99-anonbox-sync-iface`, which on `up` / `dhcp4-change` for the default-route interface **enqueues** a systemd oneshot (`systemd-run --unit=anonbox-sync-iface.service`) — it must not block NetworkManager. A marker at `/var/lib/anonbox/installed` gates the hook; `uninstall` removes the dispatcher and markers.
+**Runtime remediation:** `sudo ./anonbox sync-iface` rewrites only the NIC `TransPort`/`DNSPort` lines, verify-config, restarts Tor when already running, asserts listeners. Prefer `ensure-net` after reboot; `sync-iface` for manual drift repair. Neither regenerates nftables nor re-runs full `setup`.
 
-**Manual path:** Guests without NetworkManager should run `sync-iface` after IP changes. `anonbox check` **FAIL**s on drift (`iface-drift`) with Fix pointing at `sync-iface` (or `setup` if torrc/nft are missing).
+**Automation:** NM dispatcher `/etc/NetworkManager/dispatcher.d/99-anonbox-sync-iface` on `up`/`dhcp4-change` for a non-`lo` iface with global IPv4 starts `anonbox-net-ready` (`--no-block`). dhcpcd gets `nohook resolv.conf` plus an exit-hook that also starts net-ready. Marker `/var/lib/anonbox/installed` gates hooks; `uninstall` removes unit, dispatcher, dhcpcd snippets, and markers.
+
+**Manual path:** Guests without NM/dhcpcd hooks should run `ensure-net` after boot and `sync-iface` after IP changes. `check`/`doctor` **FAIL** on drift (`iface-drift`) and on bad resolv.conf (`resolv`).
