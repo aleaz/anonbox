@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `htpdate-tor.service` ExecStart uses Debian's `/usr/sbin/htpdate` (was wrongly `/usr/bin/htpdate`, causing boot `[FAILED]` / status 203/EXEC). Compatible with Debian 12 and 13.
+- `htpdate-tor.service` no longer passes Tor SOCKS to `htpdate -P` (`-P` is HTTP proxy only on bookworm/trixie); time sync uses transparent Tor routing instead.
+- Stock Debian `htpdate.service` is masked and `HTP_IFUP=no` so clearnet/if-up sync does not fight `htpdate-tor`.
+
 ### Added
 
 - `anonbox ensure-net` + `anonbox-net-ready.service`: wait for primary IPv4, reset Tor StartLimit, rebind NIC TransPort/DNSPort if needed, assert `/etc/resolv.conf` is `127.0.0.1` — runs `Before=tor@default` so Tor does not bind before DHCP.

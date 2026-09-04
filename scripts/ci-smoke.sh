@@ -59,6 +59,13 @@ grep -q 'rm -f "$ANONBOX_TOR_DEFAULTS"' ./anonbox || fail "uninstall must remove
 if grep -q 'ssh_output_extra' ./anonbox; then
   fail "dead ssh_output_extra still present"
 fi
+grep -q 'ConditionPathExists=' ./anonbox || fail "htpdate ConditionPathExists missing"
+grep -q '/usr/sbin/htpdate' ./anonbox || fail "htpdate must prefer /usr/sbin/htpdate"
+if grep -E 'htpdate.*-P 127\.0\.0\.1:9050' ./anonbox >/dev/null 2>&1; then
+  fail "htpdate must not use -P with Tor SOCKS (HTTP proxy only)"
+fi
+grep -q 'systemctl mask htpdate.service' ./anonbox || fail "must mask stock Debian htpdate.service"
+grep -q 'HTP_IFUP=no' ./anonbox || fail "must disable htpdate if-up hook"
 pass "hygiene and drift asserts"
 
 # nftables template: redirect + INPUT drop + fib local accept

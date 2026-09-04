@@ -161,7 +161,7 @@ For operation in heavily filtered networks (such as state-level DPI firewalls), 
 
 * **Popularity Contest Purged:** `popularity-contest` is uninstalled during setup.
 * **Masked Services:** `geoclue.service` (geolocation), `kerneloops.service`, `whoopsie.service`, `avahi-daemon`, and `cups` are masked.
-* **Deterministic `htpdate` over Tor:** Time synchronization occurs securely via Tor SOCKS5 using `htpdate`, polling until port 9050 is available.
+* **Deterministic `htpdate` over Tor:** Time synchronization uses Debian's `/usr/sbin/htpdate` (12/13) as a oneshot after Tor is up. Outbound HTTP goes through the transparent Tor proxy — do not use `htpdate -P` with SOCKS (`-P` is HTTP-proxy only). Stock `htpdate.service` is masked.
 * **UTC Timezone & Neutral Hostname:** `timedatectl set-timezone UTC` and `hostnamectl set-hostname localhost`.
 
 ---

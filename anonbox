@@ -2744,26 +2744,61 @@ EOF
     done
     ok "Noisy, telemetric and geolocation daemons disabled and masked (${#noisy_services[@]} services)"
 
-    # Deterministic Htpdate over Tor service
+    # Deterministic Htpdate over Tor (Debian 12/13 package → /usr/sbin/htpdate).
+    # Stock Debian htpdate.service uses clearnet HTTP by default; disable it and the
+    # if-up hook so only htpdate-tor (transparent Tor) owns clock sync.
     local sources_str="${HTPDATE_SOURCES[*]}"
-    backup_file "$HTPDATE_SERVICE"
-    run tee "$HTPDATE_SERVICE" > /dev/null << EOF
+    local htpdate_bin=""
+    if [[ -x /usr/sbin/htpdate ]]; then
+        htpdate_bin="/usr/sbin/htpdate"
+    elif [[ -x /usr/bin/htpdate ]]; then
+        htpdate_bin="/usr/bin/htpdate"
+    else
+        htpdate_bin="$(PATH="/usr/sbin:/sbin:/usr/bin:/bin${PATH:+:$PATH}" command -v htpdate 2>/dev/null || true)"
+    fi
+
+    run systemctl disable --now htpdate.service 2>/dev/null || true
+    run systemctl mask htpdate.service 2>/dev/null || true
+    if [[ -f /etc/default/htpdate ]]; then
+        backup_file /etc/default/htpdate
+        if grep -Eq '^[[:space:]]*#?[[:space:]]*HTP_IFUP=' /etc/default/htpdate 2>/dev/null; then
+            run sed -i -E 's/^[[:space:]]*#?[[:space:]]*HTP_IFUP=.*/HTP_IFUP=no/' /etc/default/htpdate
+        else
+            printf '\n# anonbox: do not restart stock htpdate on if-up\nHTP_IFUP=no\n' >> /etc/default/htpdate
+        fi
+        record_touched_file /etc/default/htpdate
+    fi
+
+    if [[ -z "$htpdate_bin" || ! -x "$htpdate_bin" ]]; then
+        warn "htpdate binary not found; skipping htpdate-tor.service (install package htpdate and re-run harden)"
+    else
+        backup_file "$HTPDATE_SERVICE"
+        # -P is an HTTP proxy only (not SOCKS). Same on bookworm and trixie.
+        # Under anonbox, outbound TCP/DNS already goes through Tor TransPort/DNSPort.
+        run tee "$HTPDATE_SERVICE" > /dev/null << EOF
 [Unit]
 Description=Secure Time Sync via Tor (htpdate)
-After=tor@default.service
-Requires=tor@default.service
+After=tor@default.service network-online.target
+Wants=tor@default.service
+ConditionPathExists=${htpdate_bin}
 
 [Service]
 Type=oneshot
+TimeoutStartSec=120
 ExecStartPre=/bin/sh -c 'until nc -z 127.0.0.1 9050; do sleep 2; done'
-ExecStart=/usr/bin/htpdate -s -t -P 127.0.0.1:9050 ${sources_str}
+ExecStart=${htpdate_bin} -s -t -l ${sources_str}
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    run systemctl daemon-reload
-    run systemctl enable htpdate-tor.service 2>/dev/null || true
+        run systemctl daemon-reload
+        run systemctl enable htpdate-tor.service 2>/dev/null || true
+        run systemctl reset-failed htpdate-tor.service 2>/dev/null || true
+        if ! run systemctl start htpdate-tor.service 2>/dev/null; then
+            warn "htpdate-tor.service failed to start (clock sync over Tor may retry after bootstrap)"
+        fi
+    fi
 
     ok "Hardening pipeline completed successfully!"
     if (( IN_PIPELINE == 0 )); then
@@ -3823,6 +3858,7 @@ cmd_uninstall()
 
     run systemctl disable --now htpdate-tor.service 2>/dev/null || true
     run rm -f "$HTPDATE_SERVICE"
+    run systemctl unmask htpdate.service 2>/dev/null || true
 
     run systemctl disable --now "macchanger@${IFACE}.service" 2>/dev/null || true
     run rm -f "$MAC_SERVICE"
